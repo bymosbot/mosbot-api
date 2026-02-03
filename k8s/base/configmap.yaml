@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mosbot-api-config
+  namespace: mosbot
+data:
+  JWT_EXPIRES_IN: "7d"
+  CORS_ORIGIN: "*"  # Override in production overlay with actual frontend URL

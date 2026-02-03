@@ -1,0 +1,6 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mosbot-api
+spec:
+  replicas: 3  # Scale to 3 replicas in production for HA

@@ -1,0 +1,50 @@
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+npm-debug.log
+yarn-error.log
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Documentation
+README.md
+*.md
+!package.json
+
+# CI/CD
+.github
+
+# K8s manifests
+k8s/
+*.yaml
+*.yml
+!package*.json
+
+# Tests
+test/
+tests/
+*.test.js
+*.spec.js
+coverage/
+
+# Misc
+.dockerignore
+Dockerfile
+docker-compose*.yml
