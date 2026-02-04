@@ -6,3 +6,8 @@ metadata:
 data:
   JWT_EXPIRES_IN: "7d"
   CORS_ORIGIN: "*"  # Override in production overlay with actual frontend URL
+  # Archive Job Configuration
+  ENABLE_ARCHIVER: "true"
+  ARCHIVE_CRON: "0 3 * * *"  # Default: 3 AM daily
+  ARCHIVE_AFTER_DAYS: "7"  # Archive tasks DONE for more than 7 days
+  ARCHIVE_ON_STARTUP: "false"  # Set to "true" to run archive job on startup

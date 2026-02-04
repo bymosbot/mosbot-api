@@ -19,6 +19,10 @@ router.get('/', async (req, res, next) => {
   try {
     const { category, limit = 100, offset = 0, start_date, end_date } = req.query;
     
+    // Validate pagination parameters
+    const limitNum = Math.max(1, Math.min(parseInt(limit) || 100, 1000));
+    const offsetNum = Math.max(0, parseInt(offset) || 0);
+    
     let query = 'SELECT * FROM activity_logs WHERE 1=1';
     const params = [];
     let paramCount = 1;
@@ -42,15 +46,15 @@ router.get('/', async (req, res, next) => {
     }
     
     query += ` ORDER BY timestamp DESC LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
-    params.push(parseInt(limit), parseInt(offset));
+    params.push(limitNum, offsetNum);
     
     const result = await pool.query(query, params);
     
     res.json({
       data: result.rows,
       pagination: {
-        limit: parseInt(limit),
-        offset: parseInt(offset),
+        limit: limitNum,
+        offset: offsetNum,
         total: result.rowCount
       }
     });

@@ -24,28 +24,41 @@ const isValidEmail = (email) => {
 // GET /api/v1/users - List all users
 router.get('/', async (req, res, next) => {
   try {
-    const { limit = 100, offset = 0, search } = req.query;
+    const { limit = 100, offset = 0, search, active_only } = req.query;
     
-    let query = 'SELECT id, name, email, avatar_url, created_at, updated_at FROM users';
+    // Validate pagination parameters
+    const limitNum = Math.max(1, Math.min(parseInt(limit) || 100, 1000));
+    const offsetNum = Math.max(0, parseInt(offset) || 0);
+    
+    let query = 'SELECT id, name, email, avatar_url, active, created_at, updated_at FROM users';
     const params = [];
     let paramCount = 1;
+    const conditions = [];
+    
+    if (active_only === 'true') {
+      conditions.push(`active = true`);
+    }
     
     if (search) {
-      query += ` WHERE name ILIKE $${paramCount} OR email ILIKE $${paramCount}`;
+      conditions.push(`(name ILIKE $${paramCount} OR email ILIKE $${paramCount})`);
       params.push(`%${search}%`);
       paramCount++;
     }
     
-    query += ` ORDER BY created_at DESC LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
-    params.push(parseInt(limit), parseInt(offset));
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(' AND ')}`;
+    }
+    
+    query += ` ORDER BY name ASC LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
+    params.push(limitNum, offsetNum);
     
     const result = await pool.query(query, params);
     
     res.json({
       data: result.rows,
       pagination: {
-        limit: parseInt(limit),
-        offset: parseInt(offset),
+        limit: limitNum,
+        offset: offsetNum,
         total: result.rowCount
       }
     });
@@ -103,9 +116,9 @@ router.post('/', async (req, res, next) => {
     const password_hash = await bcrypt.hash(password, saltRounds);
     
     const result = await pool.query(`
-      INSERT INTO users (name, email, password_hash, avatar_url)
-      VALUES ($1, $2, $3, $4)
-      RETURNING id, name, email, avatar_url, created_at, updated_at
+      INSERT INTO users (name, email, password_hash, avatar_url, active)
+      VALUES ($1, $2, $3, $4, true)
+      RETURNING id, name, email, avatar_url, active, created_at, updated_at
     `, [name, email, password_hash, avatar_url]);
     
     res.status(201).json({ data: result.rows[0] });

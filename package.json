@@ -7,6 +7,7 @@
     "start": "node src/index.js",
     "dev": "nodemon src/index.js",
     "migrate": "node src/db/migrate.js",
+    "db:reset": "node src/db/reset.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": ["mosbot", "task-management", "api", "self-hosted"],
@@ -21,7 +22,8 @@
     "jsonwebtoken": "^9.0.2",
     "uuid": "^9.0.1",
     "helmet": "^7.1.0",
-    "express-rate-limit": "^7.1.5"
+    "express-rate-limit": "^7.1.5",
+    "node-cron": "^3.0.3"
   },
   "devDependencies": {
     "nodemon": "^3.0.2"

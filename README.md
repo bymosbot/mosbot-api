@@ -29,28 +29,67 @@ Self-hosted task management API backend for MosBot - A personal productivity sys
 ### Local Development
 
 1. **Clone the repository**
+
    ```bash
    git clone https://github.com/mosufy/mosbot-api.git
    cd mosbot-api
    ```
 
 2. **Install dependencies**
+
    ```bash
    npm install
    ```
 
 3. **Configure environment**
+
    ```bash
    cp .env.example .env
    # Edit .env with your database credentials and configuration
    ```
 
 4. **Run database migrations**
+
    ```bash
    npm run migrate
    ```
 
-5. **Start the server**
+5. **Reset database (optional)**
+
+   To force a complete reset of the database (drops all tables and re-runs migrations):
+
+   ```bash
+   npm run db:reset
+   ```
+
+   **Safety Features:**
+   - **Development:** Requires typing "yes" to confirm
+   - **Production:** Requires `--force` flag AND multiple confirmations:
+
+     ```bash
+     npm run db:reset -- --force
+     ```
+
+     You'll be prompted to:
+     1. Type "RESET PRODUCTION" (all caps)
+     2. Type the database name to confirm
+   - **Production Detection:** Automatically detects production environments based on:
+     - `NODE_ENV=production`
+     - Database name containing "prod" or "production"
+     - Database host that's not localhost
+
+   **Warning:** This will delete all data in the database!
+
+   **For Docker Compose users:** You can also reset by removing the PostgreSQL volume:
+
+   ```bash
+   docker-compose down -v
+   docker-compose up -d
+   npm run migrate
+   ```
+
+6. **Start the server**
+
    ```bash
    # Development mode with hot reload
    npm run dev
@@ -59,7 +98,8 @@ Self-hosted task management API backend for MosBot - A personal productivity sys
    npm start
    ```
 
-6. **Verify health**
+7. **Verify health**
+
    ```bash
    curl http://localhost:3000/health
    ```
@@ -92,6 +132,7 @@ docker push ghcr.io/mosufy/mosbot-api:latest
 The repository includes production-ready Kubernetes manifests using Kustomize.
 
 1. **Create secrets**
+
    ```bash
    cd k8s/base
    cp secret.template.yaml secret.yaml
@@ -99,11 +140,13 @@ The repository includes production-ready Kubernetes manifests using Kustomize.
    ```
 
 2. **Deploy to development**
+
    ```bash
    kubectl apply -k k8s/base
    ```
 
 3. **Deploy to production**
+
    ```bash
    kubectl apply -k k8s/overlays/production
    ```
@@ -121,6 +164,7 @@ See `k8s/` directory for manifest structure.
 ## 📚 API Documentation
 
 ### Base URL
+
 ```
 http://localhost:3000/api/v1
 ```
@@ -305,6 +349,7 @@ The project includes a GitHub Actions workflow that:
 4. **Tags images** with branch name, commit SHA, and semantic versions
 
 The workflow runs automatically on:
+
 - Push to `develop` or `master` branches
 - Pull requests to `develop` or `master` branches
 
@@ -335,6 +380,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 ## 📞 Support
 
 For issues and questions:
+
 - Open an issue on GitHub
 - Check existing documentation
 - Review the API examples above
