@@ -1,0 +1,11 @@
+---
+description: PostgreSQL pool usage and query conventions
+alwaysApply: false
+---
+# Database Access
+
+- Import the shared pool from `src/db/pool.js`.
+- Use parameterized queries with `$1, $2, ...` placeholders.
+- Build dynamic queries with `paramCount` and `params` arrays.
+- Check for existing records before updates or deletes to return `404`.
+- Keep inserts/updates returning rows with `RETURNING *` when needed.

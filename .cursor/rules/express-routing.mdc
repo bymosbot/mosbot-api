@@ -1,0 +1,11 @@
+---
+description: Express routing patterns for API modules
+alwaysApply: false
+---
+# Express Routing
+
+- Use `express.Router()` per file and `module.exports = router`.
+- Define handlers as `async (req, res, next)` and `catch` with `next(error)`.
+- Use the `validateUUID('id')` middleware for `/:id` params.
+- Follow REST verbs (GET/POST/PUT/PATCH/DELETE) with clear route comments.
+- For PATCH endpoints, reuse PUT logic by setting `req.method = 'PUT'` and `router.handle(...)`.

@@ -1,0 +1,13 @@
+---
+description: Express server bootstrap, middleware, and error handling
+alwaysApply: false
+---
+# Server Bootstrap
+
+- Initialize `dotenv` at the top of `src/index.js` to load `.env`.
+- Keep security middleware order: `helmet` and `cors` before routes.
+- Apply rate limiting to `/api/` with the shared limiter config.
+- Define `/health` as a simple JSON status check.
+- Mount versioned routes under `/api/v1/*`.
+- Use the centralized error handler to return `{ error: { message, status } }`.
+- Keep the 404 handler last and return `{ error: { message: 'Not found', status: 404 } }`.

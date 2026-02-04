@@ -1,0 +1,16 @@
+---
+description: API response shapes and status code conventions
+alwaysApply: false
+---
+# API Responses
+
+- Success responses use `{ data: ... }`.
+- List endpoints include pagination `{ data: [], pagination: { limit, offset, total } }`.
+- Error responses use `{ error: { message, status } }`.
+- Common status codes:
+  - `201` for created records
+  - `204` for successful deletes with no body
+  - `400` for validation failures
+  - `401` for auth failures
+  - `404` when a record is not found
+  - `409` for conflicts like duplicate email

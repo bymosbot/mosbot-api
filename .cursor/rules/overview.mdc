@@ -1,0 +1,22 @@
+---
+description: How to apply Mosbot API Cursor rules
+alwaysApply: true
+---
+# Mosbot API Rules Overview
+
+Use these rules to keep the API consistent with existing patterns in `src/`.
+
+## When to use each rule
+
+- `server-bootstrap.mdc`: apply when editing `src/index.js` (middleware, routes, error handling).
+- `express-routing.mdc`: apply for route modules under `src/routes/`.
+- `api-responses.mdc`: apply when returning JSON or status codes from routes.
+- `validation.mdc`: apply when validating request input in routes.
+- `db-access.mdc`: apply when writing SQL queries or using the `pg` pool.
+- `auth-jwt.mdc`: apply when changing login/register/verify or JWT protection.
+
+## General guidance
+
+- Prefer existing patterns in neighboring files before introducing new ones.
+- Keep response shapes and error formats consistent across endpoints.
+- Use parameterized SQL and avoid string interpolation for user input.

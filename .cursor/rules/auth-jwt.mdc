@@ -1,0 +1,12 @@
+---
+description: JWT auth flow and password handling
+alwaysApply: false
+---
+# Auth and JWT
+
+- Validate `email` and `password` inputs before queries.
+- Use `bcrypt` with `saltRounds = 10` for hashing and `compare` for login.
+- Read `JWT_SECRET` and `JWT_EXPIRES_IN` from `process.env` with safe defaults.
+- Tokens are passed as `Authorization: Bearer <token>`.
+- Return auth errors with `401` and `{ error: { message, status } }`.
+- Export `authenticateToken` to protect other routes.

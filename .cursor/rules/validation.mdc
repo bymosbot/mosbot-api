@@ -1,0 +1,12 @@
+---
+description: Validation and input checks for API routes
+alwaysApply: false
+---
+# Validation Patterns
+
+- Required strings should be trimmed and checked for empty values.
+- Enforce length limits (e.g., `title <= 500`).
+- Use enum allowlists for `status` and `priority`.
+- Validate UUID params with the shared regex and return `400` on mismatch.
+- Validate emails with `/^[^\s@]+@[^\s@]+\.[^\s@]+$/`.
+- Return early with `{ error: { message, status } }` for validation failures.
