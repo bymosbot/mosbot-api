@@ -13,6 +13,7 @@ Self-hosted task management API backend for MosBot - A personal productivity sys
 - **Activity Logging** - Track all activities and events
 - **JWT Authentication** - Secure token-based authentication
 - **PostgreSQL Database** - Reliable, production-ready data persistence
+- **OpenClaw Integration** - Access OpenClaw workspace files via HTTP API
 - **Kubernetes-Ready** - Production-grade K8s manifests with GitOps support
 - **Docker Support** - Multi-stage builds for efficient containerization
 - **Self-Hosted First** - No vendor lock-in, runs entirely on your infrastructure
@@ -98,7 +99,29 @@ Self-hosted task management API backend for MosBot - A personal productivity sys
    npm start
    ```
 
-7. **Verify health**
+7. **Configure OpenClaw Integration (Optional)**
+
+   The OpenClaw workspace integration is disabled by default in local development. To enable it:
+
+   **Option A: Use port-forwarding** (recommended for testing)
+
+   ```bash
+   # In a separate terminal, port-forward the OpenClaw workspace service
+   # Replace <openclaw-personal> with your OpenClaw namespace (e.g., agents, openclaw-personal)
+   kubectl port-forward -n openclaw-personal svc/openclaw-workspace 8080:8080
+   ```
+
+   Then in your `.env` file:
+
+   ```bash
+   OPENCLAW_WORKSPACE_URL=http://localhost:8080
+   ```
+
+   **Option B: Disable** (default)
+
+   Leave `OPENCLAW_WORKSPACE_URL` empty or unset in your `.env` file.
+
+8. **Verify health**
 
    ```bash
    curl http://localhost:3000/health
@@ -163,9 +186,31 @@ See `k8s/` directory for manifest structure.
 
 ## 📚 API Documentation
 
+### OpenClaw Integration
+
+#### Public API
+
+- **Public API Contract**: [`docs/api/openclaw-public-api.md`](docs/api/openclaw-public-api.md) - Task management API for OpenClaw
+
+#### Workspace Integration (Implementation Complete)
+
+- **Quick Start**: [`docs/implementations/openclaw-workspace/quickstart.md`](docs/implementations/openclaw-workspace/quickstart.md) - Get workspace access running in 15 minutes
+- **Integration Guide**: [`docs/implementations/openclaw-workspace/integration-guide.md`](docs/implementations/openclaw-workspace/integration-guide.md) - Complete technical guide
+- **Architecture**: [`docs/implementations/openclaw-workspace/ARCHITECTURE_DIAGRAM.md`](docs/implementations/openclaw-workspace/ARCHITECTURE_DIAGRAM.md) - Visual diagrams
+- **Implementation Summary**: [`docs/implementations/openclaw-workspace/IMPLEMENTATION_SUMMARY.md`](docs/implementations/openclaw-workspace/IMPLEMENTATION_SUMMARY.md) - Overview and roadmap
+- **Setup Complete**: [`docs/implementations/openclaw-workspace/SETUP_COMPLETE.md`](docs/implementations/openclaw-workspace/SETUP_COMPLETE.md) - Deployment checklist
+
+#### Design Proposals
+
+- **Adapter Interface**: [`docs/proposals/adapter-interface-proposal.md`](docs/proposals/adapter-interface-proposal.md) - Generic adapter design proposal
+
+### Operational Guides
+
+- **Database Migrations**: [`docs/guides/migration-guide.md`](docs/guides/migration-guide.md) - How to run database migrations
+
 ### Base URL
 
-```
+```bash
 http://localhost:3000/api/v1
 ```
 
@@ -173,13 +218,13 @@ http://localhost:3000/api/v1
 
 Most endpoints require JWT authentication. Include the token in the Authorization header:
 
-```
+```bash
 Authorization: Bearer <your-jwt-token>
 ```
 
 ### Endpoints
 
-#### Authentication
+#### Authentication Endpoints
 
 - **POST** `/api/v1/auth/register` - Register a new user
 - **POST** `/api/v1/auth/login` - Login and receive JWT token
@@ -207,6 +252,15 @@ Authorization: Bearer <your-jwt-token>
 
 - **GET** `/api/v1/activity` - List all activity logs
 - **GET** `/api/v1/activity/:id` - Get a single activity log
+
+#### OpenClaw Workspace
+
+- **GET** `/api/v1/openclaw/workspace/files` - List workspace files
+- **GET** `/api/v1/openclaw/workspace/files/content` - Read file content
+- **POST** `/api/v1/openclaw/workspace/files` - Create file
+- **PUT** `/api/v1/openclaw/workspace/files` - Update file
+- **DELETE** `/api/v1/openclaw/workspace/files` - Delete file
+- **GET** `/api/v1/openclaw/workspace/status` - Get workspace status
 - **POST** `/api/v1/activity` - Create a new activity log
 - **PUT** `/api/v1/activity/:id` - Update an activity log
 - **PATCH** `/api/v1/activity/:id` - Partial update an activity log
@@ -270,7 +324,7 @@ curl http://localhost:3000/api/v1/tasks?assignee_id=<user-uuid>
 ### Environment Variables
 
 | Variable | Description | Default |
-|----------|-------------|---------|
+| -------- | ----------- | ------- |
 | `PORT` | Server port | `3000` |
 | `NODE_ENV` | Environment (development/production) | `development` |
 | `DB_HOST` | PostgreSQL host | `localhost` |
@@ -289,17 +343,45 @@ The application uses PostgreSQL with the following main tables:
 - **users** - User accounts and authentication
 - **tasks** - Task management with status tracking
 - **activity_logs** - Activity and event logging
+- **task_logs** - Per-task history and audit trail
 
-See `src/db/schema.sql` for the complete schema definition.
+### Database Constraints
+
+The database includes comprehensive constraints for data integrity:
+
+- **Tags Validation**: Maximum 20 tags, 50 chars each, lowercase only, no empty tags
+- **Email Format**: Basic email format validation
+- **Status Consistency**: `done_at` and `archived_at` must align with task status
+- **Date Validation**: Completion/archive dates must be after creation date
+- **String Validation**: Non-empty titles and user names
+
+All constraints are defined in `src/db/schema.sql` and applied automatically during migration.
+
+**Test constraints**:
+
+```bash
+node src/db/test-constraints.js
+```
+
+See `docs/guides/database-constraints-guide.md` for detailed constraint documentation and `src/db/schema.sql` for the complete schema definition.
 
 ## 🧪 Testing
 
 ```bash
-# Run tests (when implemented)
+# Run all tests
 npm test
 
-# Run linter (when configured)
+# Run tests in watch mode
+npm run test:watch
+
+# Run linter
 npm run lint
+
+# Run linter with auto-fix
+npm run lint:fix
+
+# Run linter for CI/CD (fails on warnings)
+npm run lint:check
 ```
 
 ## 🔒 Security
@@ -315,7 +397,7 @@ npm run lint
 
 ## 📦 Project Structure
 
-```
+```bash
 mosbot-api/
 ├── src/
 │   ├── db/
@@ -400,4 +482,4 @@ For issues and questions:
 
 ---
 
-**Built with ❤️ for self-hosted productivity**
+Built with ❤️ for self-hosted productivity.

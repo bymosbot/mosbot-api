@@ -87,6 +87,17 @@ spec:
                 configMapKeyRef:
                   name: mosbot-api-config
                   key: CORS_ORIGIN
+            - name: OPENCLAW_WORKSPACE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: mosbot-api-config
+                  key: OPENCLAW_WORKSPACE_URL
+            - name: OPENCLAW_WORKSPACE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: mosbot-api-secrets
+                  key: OPENCLAW_WORKSPACE_TOKEN
+                  optional: true
           ports:
             - name: http
               containerPort: 3000

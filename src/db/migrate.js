@@ -3,7 +3,8 @@ const fs = require('fs');
 const path = require('path');
 const pool = require('./pool');
 
-async function migrate() {
+async function migrate(options = {}) {
+  const { endPool = true } = options;
   const client = await pool.connect();
   
   try {
@@ -22,7 +23,9 @@ async function migrate() {
     throw error;
   } finally {
     client.release();
-    await pool.end();
+    if (endPool) {
+      await pool.end();
+    }
   }
 }
 

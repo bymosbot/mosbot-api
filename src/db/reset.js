@@ -105,9 +105,11 @@ async function confirmReset() {
 }
 
 async function reset() {
-  const client = await pool.connect();
+  let client;
+  let clientReleased = false;
   
   try {
+    client = await pool.connect();
     console.log('🔄 Resetting database...');
     
     // Drop all tables in correct order (respecting foreign key constraints)
@@ -118,22 +120,31 @@ async function reset() {
     
     // Drop functions
     await client.query('DROP FUNCTION IF EXISTS update_updated_at() CASCADE');
+    await client.query('DROP FUNCTION IF EXISTS validate_tags_length(TEXT[]) CASCADE');
+    await client.query('DROP FUNCTION IF EXISTS validate_tags_lowercase(TEXT[]) CASCADE');
+    await client.query('DROP FUNCTION IF EXISTS validate_tags_not_empty(TEXT[]) CASCADE');
     
     console.log('✅ Database tables dropped');
     
     // Release client before running migrations
     client.release();
+    clientReleased = true;
     
-    // Run migrations to recreate schema
-    await migrate();
+    // Run migrations to recreate schema (don't end pool, we'll do it in finally)
+    await migrate({ endPool: false });
     
     console.log('✅ Database reset completed successfully');
   } catch (error) {
     console.error('❌ Database reset failed:', error);
     throw error;
   } finally {
-    if (!client._ended) {
-      client.release();
+    // Only release if not already released
+    if (client && !clientReleased) {
+      try {
+        client.release();
+      } catch (_releaseError) {
+        // Ignore release errors
+      }
     }
     await pool.end();
   }

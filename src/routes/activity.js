@@ -1,7 +1,6 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db/pool');
-const { v4: uuidv4 } = require('uuid');
 
 // Middleware to validate UUID
 const validateUUID = (paramName) => (req, res, next) => {
@@ -17,19 +16,33 @@ const validateUUID = (paramName) => (req, res, next) => {
 // GET /api/v1/activity - List all activity logs with optional filtering
 router.get('/', async (req, res, next) => {
   try {
-    const { category, limit = 100, offset = 0, start_date, end_date } = req.query;
+    const { category, task_id, limit = 100, offset = 0, start_date, end_date } = req.query;
     
     // Validate pagination parameters
     const limitNum = Math.max(1, Math.min(parseInt(limit) || 100, 1000));
     const offsetNum = Math.max(0, parseInt(offset) || 0);
     
-    let query = 'SELECT * FROM activity_logs WHERE 1=1';
+    // Validate task_id UUID format if provided
+    if (task_id) {
+      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      if (!uuidRegex.test(task_id)) {
+        return res.status(400).json({ error: { message: 'Invalid UUID format for task_id', status: 400 } });
+      }
+    }
+    
+    let query = 'SELECT id, timestamp, title, description, category, task_id, created_at FROM activity_logs WHERE 1=1';
     const params = [];
     let paramCount = 1;
     
     if (category) {
       query += ` AND category = $${paramCount}`;
       params.push(category);
+      paramCount++;
+    }
+    
+    if (task_id) {
+      query += ` AND task_id = $${paramCount}`;
+      params.push(task_id);
       paramCount++;
     }
     
@@ -68,7 +81,10 @@ router.get('/:id', validateUUID('id'), async (req, res, next) => {
   try {
     const { id } = req.params;
     
-    const result = await pool.query('SELECT * FROM activity_logs WHERE id = $1', [id]);
+    const result = await pool.query(
+      'SELECT id, timestamp, title, description, category, task_id, created_at FROM activity_logs WHERE id = $1',
+      [id]
+    );
     
     if (result.rows.length === 0) {
       return res.status(404).json({ error: { message: 'Activity log not found', status: 404 } });
@@ -83,7 +99,7 @@ router.get('/:id', validateUUID('id'), async (req, res, next) => {
 // POST /api/v1/activity - Create a new activity log
 router.post('/', async (req, res, next) => {
   try {
-    const { title, description, category, timestamp } = req.body;
+    const { title, description, category, task_id, timestamp } = req.body;
     
     // Validation
     if (!title || title.trim().length === 0) {
@@ -99,10 +115,10 @@ router.post('/', async (req, res, next) => {
     }
     
     const result = await pool.query(`
-      INSERT INTO activity_logs (title, description, category, timestamp)
-      VALUES ($1, $2, $3, $4)
+      INSERT INTO activity_logs (title, description, category, task_id, timestamp)
+      VALUES ($1, $2, $3, $4, $5)
       RETURNING *
-    `, [title, description, category, timestamp || new Date()]);
+    `, [title, description, category, task_id || null, timestamp || new Date()]);
     
     res.status(201).json({ data: result.rows[0] });
   } catch (error) {
@@ -114,7 +130,7 @@ router.post('/', async (req, res, next) => {
 router.put('/:id', validateUUID('id'), async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { title, description, category, timestamp } = req.body;
+    const { title, description, category, task_id, timestamp } = req.body;
     
     // Check if activity log exists
     const existing = await pool.query('SELECT id FROM activity_logs WHERE id = $1', [id]);
@@ -155,6 +171,12 @@ router.put('/:id', validateUUID('id'), async (req, res, next) => {
     if (category !== undefined) {
       updates.push(`category = $${paramCount}`);
       params.push(category);
+      paramCount++;
+    }
+    
+    if (task_id !== undefined) {
+      updates.push(`task_id = $${paramCount}`);
+      params.push(task_id);
       paramCount++;
     }
     

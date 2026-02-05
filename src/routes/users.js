@@ -2,7 +2,6 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db/pool');
 const bcrypt = require('bcrypt');
-const { v4: uuidv4 } = require('uuid');
 
 // Middleware to validate UUID
 const validateUUID = (paramName) => (req, res, next) => {
@@ -36,7 +35,7 @@ router.get('/', async (req, res, next) => {
     const conditions = [];
     
     if (active_only === 'true') {
-      conditions.push(`active = true`);
+      conditions.push('active = true');
     }
     
     if (search) {
@@ -133,10 +132,17 @@ router.put('/:id', validateUUID('id'), async (req, res, next) => {
     const { id } = req.params;
     const { name, email, password, avatar_url } = req.body;
     
-    // Check if user exists
-    const existing = await pool.query('SELECT id FROM users WHERE id = $1', [id]);
+    // Check if user exists and get their role
+    const existing = await pool.query('SELECT id, role FROM users WHERE id = $1', [id]);
     if (existing.rows.length === 0) {
       return res.status(404).json({ error: { message: 'User not found', status: 404 } });
+    }
+    
+    // Prevent editing owner through public routes
+    if (existing.rows[0].role === 'owner') {
+      return res.status(403).json({ 
+        error: { message: 'Owner account cannot be modified through this endpoint', status: 403 } 
+      });
     }
     
     // Validation
@@ -221,6 +227,19 @@ router.patch('/:id', validateUUID('id'), async (req, res, next) => {
 router.delete('/:id', validateUUID('id'), async (req, res, next) => {
   try {
     const { id } = req.params;
+    
+    // Check if target is owner
+    const targetUser = await pool.query('SELECT role FROM users WHERE id = $1', [id]);
+    if (targetUser.rows.length === 0) {
+      return res.status(404).json({ error: { message: 'User not found', status: 404 } });
+    }
+    
+    // Prevent deleting owner through public routes
+    if (targetUser.rows[0].role === 'owner') {
+      return res.status(403).json({ 
+        error: { message: 'Owner account cannot be deleted', status: 403 } 
+      });
+    }
     
     const result = await pool.query('DELETE FROM users WHERE id = $1 RETURNING id', [id]);
     

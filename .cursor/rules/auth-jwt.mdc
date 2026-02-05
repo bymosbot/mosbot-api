@@ -2,6 +2,7 @@
 description: JWT auth flow and password handling
 alwaysApply: false
 ---
+
 # Auth and JWT
 
 - Validate `email` and `password` inputs before queries.

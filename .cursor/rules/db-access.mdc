@@ -2,6 +2,7 @@
 description: PostgreSQL pool usage and query conventions
 alwaysApply: false
 ---
+
 # Database Access
 
 - Import the shared pool from `src/db/pool.js`.

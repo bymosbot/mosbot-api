@@ -2,6 +2,7 @@
 description: API response shapes and status code conventions
 alwaysApply: false
 ---
+
 # API Responses
 
 - Success responses use `{ data: ... }`.

@@ -1,8 +1,9 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db/pool');
-const { v4: uuidv4 } = require('uuid');
 const jwt = require('jsonwebtoken');
+const logger = require('../utils/logger');
+const { validateAndNormalizeTags } = require('../utils/tags');
 
 // Middleware to validate UUID
 const validateUUID = (paramName) => (req, res, next) => {
@@ -26,7 +27,7 @@ const optionalAuth = (req, res, next) => {
     try {
       const decoded = jwt.verify(token, jwtSecret);
       req.user = decoded;
-    } catch (err) {
+    } catch (_err) {
       // Invalid token - continue without setting req.user
     }
   }
@@ -54,16 +55,29 @@ async function logTaskEvent(client, taskId, eventType, source, actorId, oldValue
 function computeTaskDiff(oldTask, newTask) {
   const oldValues = {};
   const newValues = {};
-  const fieldsToCompare = ['title', 'summary', 'status', 'priority', 'type', 'reporter_id', 'assignee_id', 'due_date', 'done_at', 'archived_at'];
+  const fieldsToCompare = ['title', 'summary', 'status', 'priority', 'type', 'reporter_id', 'assignee_id', 'due_date', 'done_at', 'archived_at', 'tags'];
   
   for (const field of fieldsToCompare) {
     const oldVal = oldTask[field];
     const newVal = newTask[field];
     
-    // Compare values (handle null/undefined)
-    if (oldVal !== newVal) {
-      oldValues[field] = oldVal;
-      newValues[field] = newVal;
+    // Special handling for array fields (tags)
+    if (field === 'tags') {
+      // Deep compare arrays
+      const oldArray = oldVal || [];
+      const newArray = newVal || [];
+      
+      if (oldArray.length !== newArray.length || 
+          !oldArray.every((val, idx) => val === newArray[idx])) {
+        oldValues[field] = oldVal;
+        newValues[field] = newVal;
+      }
+    } else {
+      // Compare values (handle null/undefined)
+      if (oldVal !== newVal) {
+        oldValues[field] = oldVal;
+        newValues[field] = newVal;
+      }
     }
   }
   
@@ -101,7 +115,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       paramCount++;
     } else if (include_archived !== 'true') {
       // Exclude archived tasks by default unless explicitly requested
-      query += ` AND t.status != 'ARCHIVE'`;
+      query += ' AND t.status != \'ARCHIVE\'';
     }
     
     if (assignee_id) {
@@ -182,7 +196,8 @@ router.post('/', optionalAuth, async (req, res, next) => {
       type = 'task',
       reporter_id,
       assignee_id,
-      due_date
+      due_date,
+      tags
     } = req.body;
     
     // Validation
@@ -209,16 +224,37 @@ router.post('/', optionalAuth, async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Invalid type', status: 400 } });
     }
     
+    // Validate and normalize tags
+    let normalizedTags = null;
+    if (tags !== undefined && tags !== null) {
+      const tagResult = validateAndNormalizeTags(tags);
+      if (tagResult.error) {
+        return res.status(400).json({ error: { message: tagResult.error, status: 400 } });
+      }
+      normalizedTags = tagResult.tags;
+      
+      // Log tag creation
+      if (normalizedTags && normalizedTags.length > 0) {
+        logger.info('Tags created on task', {
+          action: 'create_task_tags',
+          actor_id: req.user?.id || null,
+          original_tags: tags,
+          normalized_tags: normalizedTags,
+          tag_count: normalizedTags.length
+        });
+      }
+    }
+    
     // Auto-set reporter_id to authenticated user if not provided
     const finalReporterId = reporter_id || req.user?.id || null;
     
     await client.query('BEGIN');
     
     const result = await client.query(`
-      INSERT INTO tasks (title, summary, status, priority, type, reporter_id, assignee_id, due_date)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      INSERT INTO tasks (title, summary, status, priority, type, reporter_id, assignee_id, due_date, tags)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *
-    `, [title, summary, status, priority, type, finalReporterId, assignee_id, due_date]);
+    `, [title, summary, status, priority, type, finalReporterId, assignee_id, due_date, normalizedTags]);
     
     const newTask = result.rows[0];
     
@@ -231,7 +267,8 @@ router.post('/', optionalAuth, async (req, res, next) => {
       priority: newTask.priority,
       reporter_id: newTask.reporter_id,
       assignee_id: newTask.assignee_id,
-      due_date: newTask.due_date
+      due_date: newTask.due_date,
+      tags: newTask.tags
     };
     
     await logTaskEvent(
@@ -282,13 +319,17 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
       type,
       reporter_id,
       assignee_id,
-      due_date
+      due_date,
+      tags
     } = req.body;
     
     await client.query('BEGIN');
     
     // Fetch full existing task for diff computation
-    const existing = await client.query('SELECT * FROM tasks WHERE id = $1', [id]);
+    const existing = await client.query(
+      'SELECT id, title, summary, status, priority, type, reporter_id, assignee_id, due_date, done_at, archived_at, tags FROM tasks WHERE id = $1',
+      [id]
+    );
     if (existing.rows.length === 0) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: { message: 'Task not found', status: 404 } });
@@ -324,6 +365,39 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
     if (type && !validTypes.includes(type)) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: { message: 'Invalid type', status: 400 } });
+    }
+    
+    // Validate and normalize tags
+    let normalizedTags = undefined;
+    if (tags !== undefined) {
+      if (tags === null) {
+        normalizedTags = null;
+      } else {
+        const tagResult = validateAndNormalizeTags(tags);
+        if (tagResult.error) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: { message: tagResult.error, status: 400 } });
+        }
+        normalizedTags = tagResult.tags;
+        
+        // Log tag update if tags are changing
+        const oldTags = oldTask.tags || [];
+        const newTags = normalizedTags || [];
+        const tagsChanged = JSON.stringify(oldTags.sort()) !== JSON.stringify(newTags.sort());
+        
+        if (tagsChanged) {
+          logger.info('Tags updated on task', {
+            action: 'update_task_tags',
+            actor_id: req.user?.id || null,
+            task_id: id,
+            original_tags: tags,
+            normalized_tags: normalizedTags,
+            old_tags: oldTags,
+            new_tags: newTags,
+            tag_count: newTags.length
+          });
+        }
+      }
     }
     
     // Build dynamic update query
@@ -379,23 +453,29 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
       paramCount++;
     }
     
+    if (normalizedTags !== undefined) {
+      updates.push(`tags = $${paramCount}`);
+      params.push(normalizedTags);
+      paramCount++;
+    }
+    
     // Handle status transitions for done_at and archived_at
     if (status !== undefined && status !== currentStatus) {
       // Transition to DONE: set done_at
       if (status === 'DONE') {
-        updates.push(`done_at = NOW()`);
+        updates.push('done_at = NOW()');
       }
       // Transition away from DONE: clear done_at (but preserve it when archiving)
       if (currentStatus === 'DONE' && status !== 'DONE' && status !== 'ARCHIVE') {
-        updates.push(`done_at = NULL`);
+        updates.push('done_at = NULL');
       }
       // Transition to ARCHIVE: set archived_at
       if (status === 'ARCHIVE') {
-        updates.push(`archived_at = NOW()`);
+        updates.push('archived_at = NOW()');
       }
       // Transition away from ARCHIVE: clear archived_at
       if (currentStatus === 'ARCHIVE' && status !== 'ARCHIVE') {
-        updates.push(`archived_at = NULL`);
+        updates.push('archived_at = NULL');
       }
     }
     
@@ -480,6 +560,40 @@ router.get('/:id/history', optionalAuth, validateUUID('id'), async (req, res, ne
       LEFT JOIN users u ON tl.actor_id = u.id
       WHERE tl.task_id = $1
       ORDER BY tl.occurred_at DESC
+      LIMIT $2 OFFSET $3
+    `, [id, parseInt(limit), parseInt(offset)]);
+    
+    res.json({
+      data: result.rows,
+      pagination: {
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        total: result.rowCount
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/v1/tasks/:id/activity - Get activity logs for a task
+router.get('/:id/activity', optionalAuth, validateUUID('id'), async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { limit = 100, offset = 0 } = req.query;
+    
+    // First check if task exists
+    const taskExists = await pool.query('SELECT id FROM tasks WHERE id = $1', [id]);
+    if (taskExists.rows.length === 0) {
+      return res.status(404).json({ error: { message: 'Task not found', status: 404 } });
+    }
+    
+    // Fetch activity logs for this task
+    const result = await pool.query(`
+      SELECT id, timestamp, title, description, category, task_id, created_at
+      FROM activity_logs
+      WHERE task_id = $1
+      ORDER BY timestamp DESC
       LIMIT $2 OFFSET $3
     `, [id, parseInt(limit), parseInt(offset)]);
     

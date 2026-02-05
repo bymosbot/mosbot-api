@@ -2,6 +2,7 @@
 description: Express routing patterns for API modules
 alwaysApply: false
 ---
+
 # Express Routing
 
 - Use `express.Router()` per file and `module.exports = router`.

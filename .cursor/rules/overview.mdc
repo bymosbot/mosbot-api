@@ -2,6 +2,7 @@
 description: How to apply Mosbot API Cursor rules
 alwaysApply: true
 ---
+
 # Mosbot API Rules Overview
 
 Use these rules to keep the API consistent with existing patterns in `src/`.
@@ -14,6 +15,7 @@ Use these rules to keep the API consistent with existing patterns in `src/`.
 - `validation.mdc`: apply when validating request input in routes.
 - `db-access.mdc`: apply when writing SQL queries or using the `pg` pool.
 - `auth-jwt.mdc`: apply when changing login/register/verify or JWT protection.
+- `openclaw-integration.mdc`: apply when working with OpenClaw workspace endpoints in `src/routes/openclaw.js`.
 
 ## General guidance
 

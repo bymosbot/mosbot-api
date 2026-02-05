@@ -194,7 +194,7 @@ router.post('/verify', async (req, res, next) => {
           user: result.rows[0]
         }
       });
-    } catch (jwtError) {
+    } catch (_jwtError) {
       return res.status(401).json({ 
         error: { message: 'Invalid or expired token', status: 401 } 
       });
@@ -242,7 +242,7 @@ router.get('/me', async (req, res, next) => {
       res.json({
         data: result.rows[0]
       });
-    } catch (jwtError) {
+    } catch (_jwtError) {
       return res.status(401).json({ 
         error: { message: 'Invalid or expired token', status: 401 } 
       });
@@ -286,18 +286,19 @@ const authenticateToken = async (req, res, next) => {
       });
     }
     
-    req.user = { ...decoded, active: result.rows[0].active };
+    // Use fresh role from DB (not stale JWT claims)
+    req.user = { ...decoded, active: result.rows[0].active, role: result.rows[0].role };
     next();
-  } catch (err) {
+  } catch (_err) {
     return res.status(401).json({ 
       error: { message: 'Invalid or expired token', status: 401 } 
     });
   }
 };
 
-// Middleware to require admin role
+// Middleware to require admin role (or owner)
 const requireAdmin = (req, res, next) => {
-  if (!req.user || req.user.role !== 'admin') {
+  if (!req.user || !['admin', 'owner'].includes(req.user.role)) {
     return res.status(403).json({
       error: { message: 'Admin access required', status: 403 }
     });

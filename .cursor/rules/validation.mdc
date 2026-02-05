@@ -2,6 +2,7 @@
 description: Validation and input checks for API routes
 alwaysApply: false
 ---
+
 # Validation Patterns
 
 - Required strings should be trimmed and checked for empty values.

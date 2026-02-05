@@ -43,7 +43,9 @@ git push origin feature/your-feature-name
 ## 📋 Pull Request Guidelines
 
 ### Title Format
+
 Use conventional commit format in PR title:
+
 - `feat: Add new feature`
 - `fix: Fix bug in authentication`
 - `docs: Update API documentation`
@@ -52,6 +54,7 @@ Use conventional commit format in PR title:
 - `chore: Update dependencies`
 
 ### Description Template
+
 ```markdown
 ## Description
 Brief description of what this PR does.
@@ -74,12 +77,23 @@ Closes #123
 
 Before submitting a PR:
 
-1. **Run tests** (when available)
+1. **Run tests**
+
    ```bash
    npm test
    ```
 
-2. **Test manually**
+2. **Run linter**
+
+   ```bash
+   npm run lint
+   
+   # Auto-fix linting issues
+   npm run lint:fix
+   ```
+
+3. **Test manually**
+
    ```bash
    # Start the development server
    npm run dev
@@ -88,19 +102,22 @@ Before submitting a PR:
    curl http://localhost:3000/health
    ```
 
-3. **Check for linting errors** (when configured)
-   ```bash
-   npm run lint
-   ```
-
 ## 📐 Code Style
 
+We use ESLint to enforce consistent code style. Run `npm run lint` before committing.
+
+### Key Guidelines
+
 - Use **2 spaces** for indentation
+- Use **single quotes** for strings (enforced by ESLint)
+- Add **semicolons** at the end of statements (enforced by ESLint)
 - Use **meaningful variable names**
 - Add **comments** for complex logic
 - Follow **existing code patterns**
 - Keep functions **small and focused**
 - Use **async/await** instead of callbacks
+- Prefix unused variables with `_` (e.g., `_err`, `_next`)
+- Use `console.warn()` or `console.error()` instead of `console.log()` for logging
 
 ### Example
 
@@ -188,6 +205,6 @@ src/
 
 By contributing, you agree that your contributions will be licensed under the MIT License.
 
-## 🙏 Thank You!
+## 🙏 Thank You
 
 Your contributions make MosBot better for everyone!

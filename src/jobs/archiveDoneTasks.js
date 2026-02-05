@@ -11,6 +11,7 @@ const ARCHIVER_LOCK_ID = 123456789;
  */
 async function archiveDoneTasks(archiveAfterDays = 7) {
   const client = await pool.connect();
+  let archivedCount = 0;
   
   try {
     // Try to acquire advisory lock (non-blocking)
@@ -50,7 +51,7 @@ async function archiveDoneTasks(archiveAfterDays = 7) {
         SELECT * FROM archived_tasks
       `, [archiveAfterDays]);
       
-      const archivedCount = result.rows.length;
+      archivedCount = result.rows.length;
       
       if (archivedCount > 0) {
         console.log(`📦 Archived ${archivedCount} task(s):`);

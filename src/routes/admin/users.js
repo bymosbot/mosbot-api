@@ -3,6 +3,7 @@ const router = express.Router();
 const pool = require('../../db/pool');
 const bcrypt = require('bcrypt');
 const { authenticateToken, requireAdmin } = require('../auth');
+const logger = require('../../utils/logger');
 
 // Apply auth middleware to all routes
 router.use(authenticateToken);
@@ -93,10 +94,11 @@ router.post('/', async (req, res, next) => {
       });
     }
     
+    // Only admin and user roles can be assigned via admin endpoints (not owner)
     const validRoles = ['admin', 'user'];
     if (role && !validRoles.includes(role)) {
       return res.status(400).json({ 
-        error: { message: 'Invalid role', status: 400 } 
+        error: { message: 'Invalid role. Only admin and user roles can be assigned.', status: 400 } 
       });
     }
     
@@ -131,10 +133,57 @@ router.put('/:id', validateUUID('id'), async (req, res, next) => {
     const { id } = req.params;
     const { name, email, password, role, avatar_url, active } = req.body;
     
-    // Check if user exists
-    const existing = await pool.query('SELECT id FROM users WHERE id = $1', [id]);
+    // Check if user exists and get their role
+    const existing = await pool.query('SELECT id, role FROM users WHERE id = $1', [id]);
     if (existing.rows.length === 0) {
       return res.status(404).json({ error: { message: 'User not found', status: 404 } });
+    }
+    
+    const targetUser = existing.rows[0];
+    
+    // Admin cannot edit owner
+    if (req.user.role === 'admin' && targetUser.role === 'owner') {
+      logger.warn('Owner protection violation: Admin attempted to edit owner account', {
+        action: 'update_user',
+        actor_id: req.user.id,
+        actor_role: req.user.role,
+        target_user_id: id,
+        target_role: targetUser.role,
+        violation_type: 'admin_edit_owner'
+      });
+      return res.status(403).json({ 
+        error: { message: 'Admins cannot edit the owner account', status: 403 } 
+      });
+    }
+    
+    // Owner self-protection: cannot change own role
+    if (req.user.role === 'owner' && id === req.user.id && role !== undefined && role !== 'owner') {
+      logger.warn('Owner protection violation: Owner attempted to change own role', {
+        action: 'update_user',
+        actor_id: req.user.id,
+        actor_role: req.user.role,
+        target_user_id: id,
+        attempted_role: role,
+        violation_type: 'owner_change_own_role'
+      });
+      return res.status(400).json({ 
+        error: { message: 'Owner cannot change their own role', status: 400 } 
+      });
+    }
+    
+    // Owner self-protection: cannot deactivate themselves
+    if (req.user.role === 'owner' && id === req.user.id && active === false) {
+      logger.warn('Owner protection violation: Owner attempted to deactivate own account', {
+        action: 'update_user',
+        actor_id: req.user.id,
+        actor_role: req.user.role,
+        target_user_id: id,
+        attempted_active: active,
+        violation_type: 'owner_deactivate_self'
+      });
+      return res.status(400).json({ 
+        error: { message: 'Owner cannot deactivate their own account', status: 400 } 
+      });
     }
     
     // Validation
@@ -157,10 +206,11 @@ router.put('/:id', validateUUID('id'), async (req, res, next) => {
       });
     }
     
+    // Only admin and user roles can be assigned via admin endpoints (not owner)
     const validRoles = ['admin', 'user'];
     if (role !== undefined && !validRoles.includes(role)) {
       return res.status(400).json({ 
-        error: { message: 'Invalid role', status: 400 } 
+        error: { message: 'Invalid role. Only admin and user roles can be assigned.', status: 400 } 
       });
     }
     
@@ -257,6 +307,42 @@ router.delete('/:id', validateUUID('id'), async (req, res, next) => {
     if (id === req.user.id) {
       return res.status(400).json({ 
         error: { message: 'Cannot delete your own account', status: 400 } 
+      });
+    }
+    
+    // Check target user's role
+    const targetUser = await pool.query('SELECT role FROM users WHERE id = $1', [id]);
+    if (targetUser.rows.length === 0) {
+      return res.status(404).json({ error: { message: 'User not found', status: 404 } });
+    }
+    
+    // Owner cannot be deleted by anyone
+    if (targetUser.rows[0].role === 'owner') {
+      logger.warn('Owner protection violation: Attempted to delete owner account', {
+        action: 'delete_user',
+        actor_id: req.user.id,
+        actor_role: req.user.role,
+        target_user_id: id,
+        target_role: targetUser.rows[0].role,
+        violation_type: 'delete_owner'
+      });
+      return res.status(403).json({ 
+        error: { message: 'Owner account cannot be deleted', status: 403 } 
+      });
+    }
+    
+    // Admin cannot delete owner
+    if (req.user.role === 'admin' && targetUser.rows[0].role === 'owner') {
+      logger.warn('Owner protection violation: Admin attempted to delete owner account', {
+        action: 'delete_user',
+        actor_id: req.user.id,
+        actor_role: req.user.role,
+        target_user_id: id,
+        target_role: targetUser.rows[0].role,
+        violation_type: 'admin_delete_owner'
+      });
+      return res.status(403).json({ 
+        error: { message: 'Admins cannot delete the owner account', status: 403 } 
       });
     }
     

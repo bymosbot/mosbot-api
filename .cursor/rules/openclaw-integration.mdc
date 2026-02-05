@@ -1,0 +1,110 @@
+---
+description: OpenClaw workspace integration patterns and conventions
+alwaysApply: false
+---
+
+# OpenClaw Integration
+
+Use this rule when working with OpenClaw workspace integration endpoints in `src/routes/openclaw.js`.
+
+## Architecture Pattern
+
+### Sidecar Service Pattern
+
+- OpenClaw workspace service runs as a **sidecar container** in the OpenClaw pod
+- Shares the same PVC (PersistentVolumeClaim) with the OpenClaw agent
+- Exposed via **ClusterIP service** (internal cluster access only)
+- MosBot API acts as the **gateway** with JWT authentication
+
+### Request Flow
+
+```bash
+User → MosBot API (JWT auth) → Workspace Service (optional bearer token) → PVC
+```
+
+## Endpoint Conventions
+
+### Base Path
+
+All OpenClaw workspace endpoints use:
+
+- Base path: `/api/v1/openclaw/workspace/*`
+- Requires JWT authentication (same as other endpoints)
+- Standard response envelope: `{ data: ... }`
+
+### Endpoints
+
+- `GET /workspace/files` - List workspace files (supports `path` and `recursive` query params)
+- `GET /workspace/files/content` - Read file content (requires `path` query param)
+- `POST /workspace/files` - Create file (requires `path` and `content` in body)
+- `PUT /workspace/files` - Update file (requires `path` and `content` in body)
+- `DELETE /workspace/files` - Delete file (requires `path` query param)
+- `GET /workspace/status` - Get workspace status
+
+## Security Patterns
+
+### Authentication Layers
+
+1. **User → MosBot API**: JWT token (required)
+2. **MosBot API → Workspace Service**: Optional bearer token (service-to-service)
+3. **Path Validation**: Always validate and normalize paths to prevent traversal attacks
+
+### Path Security
+
+- Normalize all paths using `path.normalize()`
+- Block `..` sequences
+- Ensure paths stay within `/workspace` boundary
+- Validate paths before forwarding to workspace service
+
+### Example Path Validation
+
+```javascript
+function validateWorkspacePath(requestedPath) {
+  const normalized = path.normalize(requestedPath);
+  if (normalized.includes('..')) {
+    throw new Error('Path traversal not allowed');
+  }
+  if (!normalized.startsWith('/')) {
+    return '/' + normalized;
+  }
+  return normalized;
+}
+```
+
+## Error Handling
+
+- Use standard API error responses (`{ error: { message, status } }`)
+- Log all workspace operations with user attribution
+- Handle workspace service connection failures gracefully
+- Return appropriate HTTP status codes (404 for not found, 500 for service errors)
+
+## Configuration
+
+Workspace service URL is configured via environment variable:
+
+- `OPENCLAW_WORKSPACE_URL` - Full URL to workspace service (e.g., `http://openclaw-workspace.agents.svc.cluster.local:8080`)
+- `OPENCLAW_WORKSPACE_TOKEN` - Optional bearer token for service-to-service auth
+
+## Response Patterns
+
+Follow standard API response format:
+
+```javascript
+// Success
+res.status(200).json({ data: { ... } });
+
+// Created
+res.status(201).json({ data: { ... } });
+
+// No Content
+res.status(204).send();
+
+// Error
+res.status(400).json({ error: { message: '...', status: 400 } });
+```
+
+## Related Documentation
+
+- Public API contract: `docs/api/openclaw-public-api.md`
+- Complete integration guide: `docs/implementations/openclaw-workspace/integration-guide.md`
+- Quick start: `docs/implementations/openclaw-workspace/quickstart.md`
