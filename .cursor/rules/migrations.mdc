@@ -1,0 +1,47 @@
+---
+description: Database migration conventions and patterns for schema changes
+alwaysApply: false
+---
+
+# Database Migrations
+
+Apply when creating or editing migration SQL, `src/db/migrate.js`, or `src/db/run-migration.js`.
+
+## When to use what
+
+- **schema.sql**: Initial setup, full rebuild, `db:reset`, development. Idempotent (CREATE TABLE IF NOT EXISTS, CREATE OR REPLACE FUNCTION).
+- **src/db/migrations/*.sql**: Production updates, new features, altering existing tables, data changes. One file per change, run via runner or (future) tracked runner.
+
+## File naming and location
+
+- Migration files live in `src/db/migrations/`.
+- Name: `XXX-short-description.sql` (e.g. `001-add-task-id-to-activity-logs.sql`). XXX is a sequential number.
+
+## Idempotency
+
+- Migrations must be safe to run multiple times. Use existence checks before making changes.
+- Prefer: `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, `CREATE OR REPLACE FUNCTION`.
+- When no built-in exists, use `information_schema` (e.g. check `information_schema.columns` or `information_schema.tables`) inside a `DO $$ ... END $$` block before running DDL.
+
+## Adding NOT NULL columns to existing tables
+
+1. Add column as nullable.
+2. Backfill: `UPDATE table SET new_column = <default> WHERE new_column IS NULL`.
+3. Set NOT NULL: `ALTER TABLE table ALTER COLUMN new_column SET NOT NULL`.
+
+## Indexes and foreign keys
+
+- Add an index on every new foreign key column (e.g. `CREATE INDEX IF NOT EXISTS idx_<table>_<column> ON <table>(<column>)`).
+
+## Complex migrations
+
+- Wrap multi-step migrations in a transaction (`BEGIN; ... COMMIT;`) so failure rolls back.
+
+## Related files
+
+- `src/db/schema.sql` – Full schema.
+- `src/db/migrate.js` – Runs schema (startup and `npm run migrate`).
+- `src/db/run-migration.js` – Runs a single migration file by name.
+- `src/db/pool.js` – Connection pool.
+
+For how to run migrations and troubleshoot, see `docs/guides/migration-guide.md`. For the planned tracking table and runner, see `tasks/005-migration-tracking/task.md`.
