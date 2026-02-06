@@ -5,6 +5,7 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 const cron = require('node-cron');
 const archiveDoneTasks = require('./jobs/archiveDoneTasks');
+const migrate = require('./db/migrate');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -68,34 +69,46 @@ app.use((req, res) => {
   res.status(404).json({ error: { message: 'Not found', status: 404 } });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 MosBot API running on port ${PORT}`);
-  console.log(`📊 Environment: ${process.env.NODE_ENV}`);
-  console.log(`🔧 Health check: http://localhost:${PORT}/health`);
-  
-  // Start archive scheduler
-  if (ENABLE_ARCHIVER) {
-    console.log(`⏰ Archive scheduler enabled (cron: ${ARCHIVE_CRON}, after ${ARCHIVE_AFTER_DAYS} days)`);
-    
-    cron.schedule(ARCHIVE_CRON, async () => {
-      console.log('\n🕒 Running scheduled archive job...');
-      try {
-        await archiveDoneTasks(ARCHIVE_AFTER_DAYS);
-      } catch (error) {
-        console.error('Archive job error:', error);
-      }
-    });
-    
-    // Optional: Run once on startup for testing/immediate archival
-    if (process.env.ARCHIVE_ON_STARTUP === 'true') {
-      console.log('🔄 Running archive job on startup...');
-      archiveDoneTasks(ARCHIVE_AFTER_DAYS).catch(err => {
-        console.error('Startup archive job failed:', err);
-      });
-    }
-  } else {
-    console.log('⏰ Archive scheduler disabled');
+// Run migrations then start server (keeps pool open for API use)
+async function start() {
+  try {
+    await migrate({ endPool: false });
+  } catch (err) {
+    console.error('Startup migration failed, exiting:', err.message);
+    process.exit(1);
   }
-});
+
+  app.listen(PORT, () => {
+    console.log(`🚀 MosBot API running on port ${PORT}`);
+    console.log(`📊 Environment: ${process.env.NODE_ENV}`);
+    console.log(`🔧 Health check: http://localhost:${PORT}/health`);
+
+    // Start archive scheduler
+    if (ENABLE_ARCHIVER) {
+      console.log(`⏰ Archive scheduler enabled (cron: ${ARCHIVE_CRON}, after ${ARCHIVE_AFTER_DAYS} days)`);
+
+      cron.schedule(ARCHIVE_CRON, async () => {
+        console.log('\n🕒 Running scheduled archive job...');
+        try {
+          await archiveDoneTasks(ARCHIVE_AFTER_DAYS);
+        } catch (error) {
+          console.error('Archive job error:', error);
+        }
+      });
+
+      // Optional: Run once on startup for testing/immediate archival
+      if (process.env.ARCHIVE_ON_STARTUP === 'true') {
+        console.log('🔄 Running archive job on startup...');
+        archiveDoneTasks(ARCHIVE_AFTER_DAYS).catch(err => {
+          console.error('Startup archive job failed:', err);
+        });
+      }
+    } else {
+      console.log('⏰ Archive scheduler disabled');
+    }
+  });
+}
+
+start();
 
 module.exports = app;

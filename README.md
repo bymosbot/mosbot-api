@@ -148,6 +148,21 @@ docker tag mosbot-api:latest ghcr.io/mosufy/mosbot-api:latest
 docker push ghcr.io/mosufy/mosbot-api:latest
 ```
 
+### Multi-platform build (Kubernetes / mixed architectures)
+
+If you see **"no match for platform in manifest"** when pulling on a cluster, the image was built for a different CPU architecture (e.g. ARM64 on Apple Silicon) than the cluster nodes (often AMD64). Build and push a multi-platform image so both work:
+
+```bash
+# Create and use a buildx builder (once per machine)
+docker buildx create --use 2>/dev/null || true
+
+# Build for linux/amd64 and linux/arm64, then push
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/mosufy/mosbot-api:latest --push .
+```
+
+After this, `ghcr.io/mosufy/mosbot-api:latest` will have both variants; the cluster will pull the matching platform automatically.
+
 ## ☸️ Kubernetes Deployment
 
 ### Using Kustomize
