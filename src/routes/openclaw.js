@@ -259,7 +259,7 @@ router.get('/workspace/files/content', requireAuth, requireAdmin, async (req, re
 });
 
 // POST /api/v1/openclaw/workspace/files
-// Create or update file (admin/owner only)
+// Create file (admin/owner only) - fails if file already exists
 router.post('/workspace/files', requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const { path: inputPath, content, encoding = 'utf8' } = req.body;
@@ -272,10 +272,41 @@ router.post('/workspace/files', requireAuth, requireAdmin, async (req, res, next
 
     const workspacePath = normalizeAndValidateWorkspacePath(inputPath);
     
-    logger.info('Writing OpenClaw workspace file', { 
-      userId: req.user.id, 
+    // Check if file already exists before creating
+    try {
+      await makeOpenClawRequest('GET', `/files/content?path=${encodeURIComponent(workspacePath)}`);
+      
+      // If we get here, file exists - reject creation
+      logger.warn('Attempt to overwrite existing file blocked', {
+        userId: req.user.id,
+        userEmail: req.user.email,
+        path: workspacePath,
+        action: 'create_file_rejected'
+      });
+      
+      return res.status(409).json({
+        error: {
+          message: `File already exists at path: ${workspacePath}`,
+          status: 409,
+          code: 'FILE_EXISTS'
+        }
+      });
+    } catch (error) {
+      // If 404, file doesn't exist - proceed with creation
+      // If other error from workspace service, also proceed (let workspace service handle it)
+      if (error.response?.status !== 404 && error.code !== 'OPENCLAW_SERVICE_ERROR') {
+        // Unexpected error during existence check
+        throw error;
+      }
+      // File doesn't exist or service error - proceed with creation attempt
+    }
+    
+    logger.info('Creating OpenClaw workspace file', { 
+      userId: req.user.id,
+      userEmail: req.user.email,
       path: workspacePath,
-      contentLength: content.length 
+      contentLength: content.length,
+      action: 'create_file'
     });
     
     const data = await makeOpenClawRequest('POST', '/files', {

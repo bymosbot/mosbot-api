@@ -429,6 +429,7 @@ Integration tests require a running PostgreSQL database to test API endpoints an
 - **Run with**: `npm test` (will skip if database not configured)
 - **Setup Requirements**:
   1. **Configure test database** in `.env`:
+
      ```bash
      # Test database credentials
      TEST_DB_HOST=localhost
@@ -437,7 +438,9 @@ Integration tests require a running PostgreSQL database to test API endpoints an
      TEST_DB_USER=postgres
      TEST_DB_PASSWORD=your_password
      ```
+
   2. **Create test database**:
+
      ```bash
      # Using psql
      psql -U postgres -c "CREATE DATABASE mosbot_test;"
@@ -449,7 +452,9 @@ Integration tests require a running PostgreSQL database to test API endpoints an
        -p 5432:5432 \
        postgres:15-alpine
      ```
+
   3. **Run migrations** on test database:
+
      ```bash
      NODE_ENV=test npm run migrate
      ```
@@ -530,6 +535,24 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 - Containerized with [Docker](https://www.docker.com/)
 - Deployed on [Kubernetes](https://kubernetes.io/)
 - Part of the MosBot ecosystem
+
+## 📚 Documentation
+
+### OpenClaw Workspace Integration
+
+- **[Security Architecture](./docs/implementations/openclaw-workspace/WORKSPACE_SECURITY_ARCHITECTURE.md)** - Backend validation and defense-in-depth
+- **[Integration Guide](./docs/implementations/openclaw-workspace/integration-guide.md)** - Complete setup guide
+- **[Quick Start](./docs/implementations/openclaw-workspace/quickstart.md)** - Get started quickly
+
+### API Documentation
+
+- **[Public API Contract](./docs/api/openclaw-public-api.md)** - Complete API reference
+- **[File Access Control](./docs/file-access-control.md)** - Permission system
+
+### Features
+
+- [User List Permissions](./docs/user-list-permissions.md)
+- [Migrations Guide](./docs/migrations/)
 
 ## 📞 Support
 
