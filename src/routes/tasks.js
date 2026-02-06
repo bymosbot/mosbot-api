@@ -784,7 +784,7 @@ router.patch('/:taskId/comments/:commentId', optionalAuth, validateUUID('taskId'
     }
 
     // Update comment
-    const updateResult = await client.query(
+    await client.query(
       `
         UPDATE task_comments
         SET body = $1, updated_at = CURRENT_TIMESTAMP
@@ -793,8 +793,6 @@ router.patch('/:taskId/comments/:commentId', optionalAuth, validateUUID('taskId'
       `,
       [commentBody, commentId]
     );
-
-    const updated = updateResult.rows[0];
 
     // Fetch updated comment with author info
     const commentWithAuthor = await client.query(

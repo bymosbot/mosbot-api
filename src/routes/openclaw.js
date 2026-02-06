@@ -292,13 +292,23 @@ router.post('/workspace/files', requireAuth, requireAdmin, async (req, res, next
         }
       });
     } catch (error) {
-      // If 404, file doesn't exist - proceed with creation
-      // If other error from workspace service, also proceed (let workspace service handle it)
-      if (error.response?.status !== 404 && error.code !== 'OPENCLAW_SERVICE_ERROR') {
-        // Unexpected error during existence check
+      // Error handling for existence check:
+      // - 404 Not Found: File doesn't exist, proceed with creation
+      // - OPENCLAW_SERVICE_ERROR: Service returned an error (could be 404 or other status),
+      //   proceed and let workspace service handle it during creation
+      // - Other errors: Unexpected errors (network, timeout, etc.), throw to propagate
+      
+      const isFileNotFound = error.status === 404;
+      const isServiceError = error.code === 'OPENCLAW_SERVICE_ERROR';
+      
+      if (!isFileNotFound && !isServiceError) {
+        // Unexpected error during existence check (network, timeout, etc.)
+        // Propagate to error handler
         throw error;
       }
-      // File doesn't exist or service error - proceed with creation attempt
+      
+      // File doesn't exist (404) or service error - proceed with creation attempt
+      // The workspace service will handle validation during the actual creation
     }
     
     logger.info('Creating OpenClaw workspace file', { 
