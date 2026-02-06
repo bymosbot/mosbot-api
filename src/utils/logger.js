@@ -1,3 +1,4 @@
+/* eslint-disable no-console */
 /**
  * Simple structured logger utility
  * Formats logs with timestamps and structured data for better observability

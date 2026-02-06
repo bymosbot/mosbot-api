@@ -5,17 +5,19 @@ alwaysApply: false
 
 # Database Migrations
 
-Apply when creating or editing migration SQL, `src/db/migrate.js`, or `src/db/run-migration.js`.
+Apply when creating or editing migration SQL in `src/db/migrations/` or working with `src/db/runMigrations.js`.
 
 ## When to use what
 
-- **schema.sql**: Initial setup, full rebuild, `db:reset`, development. Idempotent (CREATE TABLE IF NOT EXISTS, CREATE OR REPLACE FUNCTION).
-- **src/db/migrations/*.sql**: Production updates, new features, altering existing tables, data changes. One file per change, run via runner or (future) tracked runner.
+- **schema.sql**: Legacy full schema for reference only. Not used directly by the migration system.
+- **src/db/migrations/*.sql**: All schema changes (initial and incremental). Tracked via `schema_migrations` table. Run automatically on API startup via `runMigrations.js`.
 
 ## File naming and location
 
 - Migration files live in `src/db/migrations/`.
-- Name: `XXX-short-description.sql` (e.g. `001-add-task-id-to-activity-logs.sql`). XXX is a sequential number.
+- Name: `XXX_short_description.sql` (e.g. `001_initial_schema.sql`, `002_add_task_priority.sql`). 
+- XXX is a zero-padded 3-digit sequential number (001, 002, 003, etc.).
+- Use underscores (not hyphens) in filenames for consistency.
 
 ## Idempotency
 
@@ -37,11 +39,20 @@ Apply when creating or editing migration SQL, `src/db/migrate.js`, or `src/db/ru
 
 - Wrap multi-step migrations in a transaction (`BEGIN; ... COMMIT;`) so failure rolls back.
 
+## Migration tracking
+
+- All migrations are tracked in the `schema_migrations` table.
+- Each migration is recorded with its filename and timestamp when applied.
+- The runner (`runMigrations.js`) automatically applies only pending migrations.
+- Migrations run in alphabetical order by filename.
+- Each migration runs in a transaction; failures are not recorded.
+
 ## Related files
 
-- `src/db/schema.sql` – Full schema.
-- `src/db/migrate.js` – Runs schema (startup and `npm run migrate`).
-- `src/db/run-migration.js` – Runs a single migration file by name.
+- `src/db/runMigrations.js` – Automated migration runner with tracking.
+- `src/db/migrations/` – Migration SQL files.
+- `src/db/schema.sql` – Legacy full schema (reference only).
 - `src/db/pool.js` – Connection pool.
+- `src/db/reset.js` – Database reset utility (drops all tables including `schema_migrations`).
 
-For how to run migrations and troubleshoot, see `docs/guides/migration-guide.md`. For the planned tracking table and runner, see `tasks/005-migration-tracking/task.md`.
+For how to run migrations and troubleshoot, see `docs/guides/migration-guide.md`.

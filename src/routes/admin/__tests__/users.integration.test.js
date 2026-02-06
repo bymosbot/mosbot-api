@@ -16,6 +16,7 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcrypt');
 const pool = require('../../../db/pool');
+const runMigrations = require('../../../db/runMigrations');
 const usersRouter = require('../users');
 const authRouter = require('../../auth');
 
@@ -56,6 +57,15 @@ describe('Owner Protection Integration Tests', () => {
   let _userToken;
 
   beforeAll(async () => {
+    // Run migrations to ensure schema exists
+    try {
+      await runMigrations({ endPool: false });
+    } catch (error) {
+      // If migrations fail, log and continue (might be connection issue)
+      console.error('Migration setup failed:', error.message);
+      // Don't throw - let the test fail with a clearer error
+    }
+
     // Set up Express app
     app = express();
     app.use(express.json());
@@ -190,6 +200,136 @@ describe('Owner Protection Integration Tests', () => {
 
       expect(response.status).toBe(200);
       expect(response.body.data.name).toBe('Updated User Name');
+    });
+  });
+
+  describe('Owner can update own profile (except role)', () => {
+    test('should allow owner to update own name', async () => {
+      const response = await request(app)
+        .put(`/api/v1/admin/users/${ownerUser.id}`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ name: 'Updated Owner Name' });
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.name).toBe('Updated Owner Name');
+      expect(response.body.data.role).toBe('owner'); // Role should remain owner
+    });
+
+    test('should allow owner to update own email', async () => {
+      const newEmail = 'test-owner-new@example.com';
+      const response = await request(app)
+        .put(`/api/v1/admin/users/${ownerUser.id}`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ email: newEmail });
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.email).toBe(newEmail);
+      expect(response.body.data.role).toBe('owner'); // Role should remain owner
+    });
+
+    test('should allow owner to update own password', async () => {
+      const response = await request(app)
+        .put(`/api/v1/admin/users/${ownerUser.id}`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ password: 'newpassword123' });
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.role).toBe('owner'); // Role should remain owner
+    });
+
+    test('should allow owner to update own profile with role=owner (no change)', async () => {
+      const response = await request(app)
+        .put(`/api/v1/admin/users/${ownerUser.id}`)
+        .set('Authorization', `Bearer ${ownerToken}`)
+        .send({ 
+          name: 'Owner Profile Update',
+          role: 'owner' // Explicitly sending owner role (should be allowed)
+        });
+
+      expect(response.status).toBe(200);
+      expect(response.body.data.name).toBe('Owner Profile Update');
+      expect(response.body.data.role).toBe('owner');
+    });
+  });
+
+  describe('User list viewing permissions', () => {
+    test('should allow regular user to view user list', async () => {
+      const userToken = getToken(regularUser.id, 'user');
+      
+      const response = await request(app)
+        .get('/api/v1/admin/users')
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.data).toBeDefined();
+      expect(Array.isArray(response.body.data)).toBe(true);
+      expect(response.body.data.length).toBeGreaterThan(0);
+    });
+
+    test('should allow regular user to view specific user by ID', async () => {
+      const userToken = getToken(regularUser.id, 'user');
+      
+      const response = await request(app)
+        .get(`/api/v1/admin/users/${adminUser.id}`)
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(response.status).toBe(200);
+      expect(response.body.data).toBeDefined();
+      expect(response.body.data.id).toBe(adminUser.id);
+      expect(response.body.data.email).toBe(adminUser.email);
+    });
+
+    test('should deny regular user from creating users', async () => {
+      const userToken = getToken(regularUser.id, 'user');
+      
+      const response = await request(app)
+        .post('/api/v1/admin/users')
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({
+          name: 'New User',
+          email: 'newuser@example.com',
+          password: 'password123',
+          role: 'user'
+        });
+
+      expect(response.status).toBe(403);
+      expect(response.body.error.message).toBe('Admin access required');
+    });
+
+    test('should deny regular user from updating users', async () => {
+      const userToken = getToken(regularUser.id, 'user');
+      
+      const response = await request(app)
+        .put(`/api/v1/admin/users/${regularUser.id}`)
+        .set('Authorization', `Bearer ${userToken}`)
+        .send({ name: 'Updated Name' });
+
+      expect(response.status).toBe(403);
+      expect(response.body.error.message).toBe('Admin access required');
+    });
+
+    test('should deny regular user from deleting users', async () => {
+      const userToken = getToken(regularUser.id, 'user');
+      
+      // Create a test user to try to delete
+      const testUser = await createTestUser('Delete Test', 'test-delete@example.com', 'password123', 'user');
+      
+      const response = await request(app)
+        .delete(`/api/v1/admin/users/${testUser.id}`)
+        .set('Authorization', `Bearer ${userToken}`);
+
+      expect(response.status).toBe(403);
+      expect(response.body.error.message).toBe('Admin access required');
+      
+      // Clean up
+      await pool.query('DELETE FROM users WHERE id = $1', [testUser.id]);
+    });
+
+    test('should deny unauthenticated access to user list', async () => {
+      const response = await request(app)
+        .get('/api/v1/admin/users');
+
+      expect(response.status).toBe(401);
     });
   });
 });

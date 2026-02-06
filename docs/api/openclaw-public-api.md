@@ -2,6 +2,59 @@
 
 This document describes the **public HTTP API contract** OpenClaw can use to integrate with Mosbot as a task backend.
 
+## Table of Contents
+
+- [Versioning](#versioning)
+- [Health check](#health-check-no-auth)
+- [Conventions](#conventions)
+  - [Content type](#content-type)
+  - [Rate limiting](#rate-limiting)
+  - [Authentication (JWT Bearer)](#authentication-jwt-bearer)
+  - [Response envelopes](#response-envelopes)
+  - [IDs and timestamps](#ids-and-timestamps)
+- [Data model (public contract)](#data-model-public-contract)
+  - [Task](#task)
+  - [Enums](#enums)
+  - [Tags normalization rules](#tags-normalization-rules)
+  - [User (assignees/reporters)](#user-assigneesreporters)
+  - [Task history (audit log)](#task-history-audit-log)
+  - [Activity log](#activity-log)
+- [Authentication endpoints](#authentication-endpoints)
+  - [POST `/auth/login`](#post-authlogin)
+  - [GET `/auth/me`](#get-authme)
+  - [POST `/auth/verify`](#post-authverify)
+- [Task endpoints (OpenClaw adapter surface)](#task-endpoints-openclaw-adapter-surface)
+  - [GET `/tasks`](#get-tasks)
+  - [GET `/tasks/:id`](#get-tasksid)
+  - [POST `/tasks`](#post-tasks)
+  - [PUT `/tasks/:id` (and PATCH `/tasks/:id`)](#put-tasksid-and-patch-tasksid)
+  - [DELETE `/tasks/:id`](#delete-tasksid)
+  - [GET `/tasks/:id/history`](#get-tasksidhistory)
+  - [GET `/tasks/:id/activity`](#get-tasksidactivity)
+  - [GET `/tasks/:id/comments`](#get-tasksidcomments)
+  - [POST `/tasks/:id/comments`](#post-tasksidcomments)
+  - [PATCH `/tasks/:taskId/comments/:commentId`](#patch-taskstaskidcommentscommentid)
+  - [DELETE `/tasks/:taskId/comments/:commentId`](#delete-taskstaskidcommentscommentid)
+- [Users (for assignee resolution)](#users-for-assignee-resolution)
+  - [GET `/users`](#get-users)
+  - [GET `/users/:id`](#get-usersid)
+- [Admin user management (admin/owner only)](#admin-user-management-adminowner-only)
+  - [GET `/admin/users`](#get-adminusers)
+  - [GET `/admin/users/:id`](#get-adminusersid)
+  - [POST `/admin/users`](#post-adminusers)
+  - [PUT `/admin/users/:id`](#put-adminusersid)
+  - [DELETE `/admin/users/:id`](#delete-adminusersid)
+- [Activity logs (optional)](#activity-logs-optional)
+  - [GET `/activity`](#get-activity)
+- [OpenClaw workspace integration](#openclaw-workspace-integration)
+  - [GET `/openclaw/workspace/files`](#get-openclawworkspacefiles)
+  - [GET `/openclaw/workspace/files/content`](#get-openclawworkspacefilescontent)
+  - [POST `/openclaw/workspace/files`](#post-openclawworkspacefiles)
+  - [PUT `/openclaw/workspace/files`](#put-openclawworkspacefiles)
+  - [DELETE `/openclaw/workspace/files`](#delete-openclawworkspacefiles)
+  - [GET `/openclaw/workspace/status`](#get-openclawworkspacestatus)
+- [Recommended OpenClaw integration flow (example)](#recommended-openclaw-integration-flow-example)
+
 ## Versioning
 
 - **API version**: `v1`
@@ -121,7 +174,7 @@ Returned by `GET /tasks/:id/history`:
 
 - `id` (uuid)
 - `task_id` (uuid)
-- `event_type` (enum): `CREATED` | `UPDATED` | `STATUS_CHANGED` | `ARCHIVED_AUTO` | `ARCHIVED_MANUAL` | `RESTORED` | `DELETED`
+- `event_type` (enum): `CREATED` | `UPDATED` | `STATUS_CHANGED` | `ARCHIVED_AUTO` | `ARCHIVED_MANUAL` | `RESTORED` | `DELETED` | `COMMENT_CREATED` | `COMMENT_UPDATED` | `COMMENT_DELETED`
 - `occurred_at` (timestamp)
 - `actor_id` (uuid | null)
 - `source` (enum): `ui` | `api` | `cron` | `system`
@@ -129,6 +182,18 @@ Returned by `GET /tasks/:id/history`:
 - `new_values` (object | null)
 - `meta` (object | null)
 - `actor_name`, `actor_email`, `actor_avatar` (nullable joined fields)
+
+### Task comment
+
+Returned by comment endpoints:
+
+- `id` (uuid)
+- `task_id` (uuid)
+- `author_id` (uuid | null)
+- `body` (string, max 5000 characters)
+- `created_at` (timestamp)
+- `updated_at` (timestamp)
+- `author_name`, `author_email`, `author_avatar` (nullable joined fields)
 
 ### Activity log
 
@@ -349,6 +414,139 @@ Response `200`:
 }
 ```
 
+### GET `/tasks/:id/comments`
+
+Get comments for a task (oldest first).
+
+Query parameters:
+
+- `limit` (optional, default `100`)
+- `offset` (optional, default `0`)
+
+Response `200`:
+
+```json
+{
+  "data": [
+    {
+      "id": "uuid",
+      "task_id": "uuid",
+      "author_id": "uuid",
+      "author_name": "John Doe",
+      "author_email": "john@example.com",
+      "author_avatar": null,
+      "body": "This is a comment",
+      "created_at": "2026-02-06T12:34:56.789Z",
+      "updated_at": "2026-02-06T12:34:56.789Z"
+    }
+  ],
+  "pagination": { "limit": 100, "offset": 0, "total": 1 }
+}
+```
+
+Errors:
+
+- `400` invalid UUID
+- `404` task not found
+
+### POST `/tasks/:id/comments`
+
+Create a comment on a task.
+
+**Authentication required** - comment will be attributed to the authenticated user.
+
+Request body:
+
+```json
+{
+  "body": "This is my comment (1-5000 characters)"
+}
+```
+
+Response `201`:
+
+```json
+{
+  "data": {
+    "id": "uuid",
+    "task_id": "uuid",
+    "author_id": "uuid",
+    "author_name": "John Doe",
+    "author_email": "john@example.com",
+    "author_avatar": null,
+    "body": "This is my comment",
+    "created_at": "2026-02-06T12:34:56.789Z",
+    "updated_at": "2026-02-06T12:34:56.789Z"
+  }
+}
+```
+
+Audit log: Creates a `COMMENT_CREATED` event in task history.
+
+Errors:
+
+- `400` invalid UUID, missing body, or body too long (>5000 chars)
+- `401` authentication required
+- `404` task not found
+
+### PATCH `/tasks/:taskId/comments/:commentId`
+
+Update a comment.
+
+**Authorization**: Only the comment author OR admin/owner can edit.
+
+Request body:
+
+```json
+{
+  "body": "Updated comment text (1-5000 characters)"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "id": "uuid",
+    "task_id": "uuid",
+    "author_id": "uuid",
+    "author_name": "John Doe",
+    "author_email": "john@example.com",
+    "author_avatar": null,
+    "body": "Updated comment text",
+    "created_at": "2026-02-06T12:34:56.789Z",
+    "updated_at": "2026-02-06T12:45:00.000Z"
+  }
+}
+```
+
+Audit log: Creates a `COMMENT_UPDATED` event in task history with old and new body values.
+
+Errors:
+
+- `400` invalid UUID, missing body, or body too long
+- `401` authentication required
+- `403` only comment author or admin/owner can edit
+- `404` comment or task not found
+
+### DELETE `/tasks/:taskId/comments/:commentId`
+
+Delete a comment.
+
+**Authorization**: Only the comment author OR admin/owner can delete.
+
+Response `204` with no body.
+
+Audit log: Creates a `COMMENT_DELETED` event in task history with the deleted body.
+
+Errors:
+
+- `400` invalid UUID
+- `401` authentication required
+- `403` only comment author or admin/owner can delete
+- `404` comment or task not found
+
 ## Users (for assignee resolution)
 
 ### GET `/users`
@@ -381,6 +579,170 @@ Response `200`:
 { "data": { "id": "uuid", "name": "...", "email": "...", "avatar_url": null, "created_at": "...", "updated_at": "..." } }
 ```
 
+## Admin user management (admin/owner only)
+
+These endpoints require admin or owner role.
+
+### GET `/admin/users`
+
+List all users (all authenticated users can view).
+
+Query parameters:
+
+- `limit` (optional, default `100`, max `1000`)
+- `offset` (optional, default `0`)
+
+Response `200`:
+
+```json
+{
+  "data": [
+    {
+      "id": "uuid",
+      "name": "...",
+      "email": "...",
+      "avatar_url": null,
+      "role": "user",
+      "active": true,
+      "created_at": "...",
+      "updated_at": "..."
+    }
+  ],
+  "pagination": { "limit": 100, "offset": 0, "total": 5 }
+}
+```
+
+### GET `/admin/users/:id`
+
+Get a single user by ID (all authenticated users can view).
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "id": "uuid",
+    "name": "...",
+    "email": "...",
+    "avatar_url": null,
+    "role": "user",
+    "active": true,
+    "created_at": "...",
+    "updated_at": "..."
+  }
+}
+```
+
+### POST `/admin/users`
+
+Create a new user (admin/owner only).
+
+Request body:
+
+```json
+{
+  "name": "John Doe",
+  "email": "john@example.com",
+  "password": "securepassword",
+  "role": "user",
+  "avatar_url": "https://example.com/avatar.jpg"
+}
+```
+
+Notes:
+
+- `role` defaults to `user` if omitted. Valid values: `admin`, `user` (owner role cannot be assigned via this endpoint)
+- `password` must be at least 8 characters
+- User is created as active by default
+
+Response `201`:
+
+```json
+{
+  "data": {
+    "id": "uuid",
+    "name": "John Doe",
+    "email": "john@example.com",
+    "avatar_url": "https://example.com/avatar.jpg",
+    "role": "user",
+    "active": true,
+    "created_at": "..."
+  }
+}
+```
+
+Errors:
+
+- `400` validation errors (missing name, invalid email, password too short, invalid role)
+- `409` email already exists
+
+### PUT `/admin/users/:id`
+
+Update a user (admin/owner only).
+
+Request body (all fields optional):
+
+```json
+{
+  "name": "Jane Doe",
+  "email": "jane@example.com",
+  "password": "newpassword",
+  "role": "admin",
+  "avatar_url": "https://example.com/new-avatar.jpg",
+  "active": false
+}
+```
+
+Protection rules:
+
+- Admin cannot edit owner accounts
+- Owner cannot change their own role
+- Owner cannot deactivate themselves
+- Cannot deactivate your own account
+- Cannot delete your own account
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "id": "uuid",
+    "name": "Jane Doe",
+    "email": "jane@example.com",
+    "avatar_url": "https://example.com/new-avatar.jpg",
+    "role": "admin",
+    "active": false,
+    "created_at": "...",
+    "updated_at": "..."
+  }
+}
+```
+
+Errors:
+
+- `400` validation errors or no fields to update
+- `403` permission denied (e.g., admin trying to edit owner)
+- `404` user not found
+- `409` email already exists
+
+### DELETE `/admin/users/:id`
+
+Delete a user (admin/owner only).
+
+Response `204` with no body.
+
+Protection rules:
+
+- Cannot delete your own account
+- Owner account cannot be deleted by anyone
+- Admin cannot delete owner
+
+Errors:
+
+- `400` attempting to delete own account
+- `403` permission denied (e.g., trying to delete owner)
+- `404` user not found
+
 ## Activity logs (optional)
 
 ### GET `/activity`
@@ -404,6 +766,184 @@ Response `200`:
 }
 ```
 
+## OpenClaw workspace integration
+
+These endpoints integrate with the OpenClaw workspace service for file management.
+
+**Note**: OpenClaw workspace service must be configured via `OPENCLAW_WORKSPACE_URL` environment variable. In local development, this must be explicitly set. In production, it defaults to the Kubernetes service URL.
+
+### GET `/openclaw/workspace/files`
+
+List workspace files (all authenticated users can view metadata).
+
+Query parameters:
+
+- `path` (optional, default `/`): workspace path to list
+- `recursive` (optional, default `false`): whether to list recursively
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "files": [
+      {
+        "name": "example.txt",
+        "path": "/example.txt",
+        "type": "file",
+        "size": 1024,
+        "modified": "2026-02-05T12:34:56.789Z"
+      }
+    ]
+  }
+}
+```
+
+Errors:
+
+- `400` invalid path (e.g., path traversal attempts)
+- `401` authentication required
+- `503` OpenClaw service not configured or unavailable
+
+### GET `/openclaw/workspace/files/content`
+
+Read file content (admin/owner only).
+
+Query parameters:
+
+- `path` (required): workspace file path
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "path": "/example.txt",
+    "content": "file content here",
+    "encoding": "utf8"
+  }
+}
+```
+
+Errors:
+
+- `400` missing or invalid path
+- `401` authentication required
+- `403` admin/owner role required
+- `404` file not found
+- `503` OpenClaw service not configured or unavailable
+
+### POST `/openclaw/workspace/files`
+
+Create or update a file (admin/owner only).
+
+Request body:
+
+```json
+{
+  "path": "/new-file.txt",
+  "content": "file content",
+  "encoding": "utf8"
+}
+```
+
+Notes:
+
+- `encoding` defaults to `utf8` if omitted
+- Path is normalized and validated (no path traversal allowed)
+
+Response `201`:
+
+```json
+{
+  "data": {
+    "path": "/new-file.txt",
+    "created": true
+  }
+}
+```
+
+Errors:
+
+- `400` missing path or content, or invalid path
+- `401` authentication required
+- `403` admin/owner role required
+- `503` OpenClaw service not configured or unavailable
+
+### PUT `/openclaw/workspace/files`
+
+Update existing file (admin/owner only).
+
+Request body:
+
+```json
+{
+  "path": "/existing-file.txt",
+  "content": "updated content",
+  "encoding": "utf8"
+}
+```
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "path": "/existing-file.txt",
+    "updated": true
+  }
+}
+```
+
+Errors:
+
+- `400` missing path or content, or invalid path
+- `401` authentication required
+- `403` admin/owner role required
+- `404` file not found
+- `503` OpenClaw service not configured or unavailable
+
+### DELETE `/openclaw/workspace/files`
+
+Delete a file (admin/owner only).
+
+Query parameters:
+
+- `path` (required): workspace file path to delete
+
+Response `204` with no body.
+
+Errors:
+
+- `400` missing or invalid path
+- `401` authentication required
+- `403` admin/owner role required
+- `404` file not found
+- `503` OpenClaw service not configured or unavailable
+
+### GET `/openclaw/workspace/status`
+
+Get workspace sync status (all authenticated users).
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "status": "synced",
+    "last_sync": "2026-02-05T12:34:56.789Z",
+    "workspace_path": "/workspace"
+  }
+}
+```
+
+Errors:
+
+- `401` authentication required
+- `503` OpenClaw service not configured or unavailable
+
+**Retry behavior**: All OpenClaw workspace requests automatically retry up to 3 times with exponential backoff (500ms base delay) for transient errors (timeouts, connection failures, 503 errors).
+
 ## Recommended OpenClaw integration flow (example)
 
 1. **Login** with a dedicated Mosbot integration user (`POST /auth/login`).
@@ -412,3 +952,56 @@ Response `200`:
 4. **Create tasks** on demand (`POST /tasks`).
 5. **Update status/assignee/tags** (`PATCH /tasks/:id`).
 6. **Read history** when you need an audit trail (`GET /tasks/:id/history`).
+
+## Quick Reference: All Endpoints
+
+### Public Endpoints (No Auth)
+
+- `GET /health` - Health check
+
+### Authentication
+
+- `POST /api/v1/auth/login` - Login and get JWT
+- `GET /api/v1/auth/me` - Get current user
+- `POST /api/v1/auth/verify` - Verify JWT
+
+### Tasks (Authenticated)
+
+- `GET /api/v1/tasks` - List tasks
+- `GET /api/v1/tasks/:id` - Get single task
+- `POST /api/v1/tasks` - Create task
+- `PUT /api/v1/tasks/:id` - Update task (full)
+- `PATCH /api/v1/tasks/:id` - Update task (partial)
+- `DELETE /api/v1/tasks/:id` - Delete task
+- `GET /api/v1/tasks/:id/history` - Get task history
+- `GET /api/v1/tasks/:id/activity` - Get task activity
+- `GET /api/v1/tasks/:id/comments` - List task comments
+- `POST /api/v1/tasks/:id/comments` - Create comment (auth required)
+- `PATCH /api/v1/tasks/:taskId/comments/:commentId` - Update comment (author or admin/owner)
+- `DELETE /api/v1/tasks/:taskId/comments/:commentId` - Delete comment (author or admin/owner)
+
+### Users (Authenticated)
+
+- `GET /api/v1/users` - List users
+- `GET /api/v1/users/:id` - Get single user
+
+### Admin Users (Admin/Owner Only)
+
+- `GET /api/v1/admin/users` - List all users (with role/active)
+- `GET /api/v1/admin/users/:id` - Get single user (with role/active)
+- `POST /api/v1/admin/users` - Create user
+- `PUT /api/v1/admin/users/:id` - Update user
+- `DELETE /api/v1/admin/users/:id` - Delete user
+
+### Activity Logs (Authenticated)
+
+- `GET /api/v1/activity` - List activity logs
+
+### OpenClaw Workspace (Authenticated)
+
+- `GET /api/v1/openclaw/workspace/files` - List files (all users)
+- `GET /api/v1/openclaw/workspace/files/content` - Read file (admin/owner)
+- `POST /api/v1/openclaw/workspace/files` - Create/update file (admin/owner)
+- `PUT /api/v1/openclaw/workspace/files` - Update file (admin/owner)
+- `DELETE /api/v1/openclaw/workspace/files` - Delete file (admin/owner)
+- `GET /api/v1/openclaw/workspace/status` - Get sync status (all users)

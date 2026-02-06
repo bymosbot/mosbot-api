@@ -9,10 +9,10 @@ const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '../../.env') });
 
 const pool = require('./pool');
+const logger = require('../utils/logger');
 
 async function testConstraints() {
-  console.log('🧪 Testing Database Constraints');
-  console.log('═'.repeat(60));
+  logger.info('Testing Database Constraints');
   
   let testsPassed = 0;
   let testsFailed = 0;
@@ -21,13 +21,13 @@ async function testConstraints() {
     // Get a test user ID
     const userResult = await pool.query('SELECT id FROM users LIMIT 1');
     if (userResult.rows.length === 0) {
-      console.error('❌ No users found in database. Cannot run tests.');
+      logger.error('No users found in database. Cannot run tests.');
       process.exit(1);
     }
     const testUserId = userResult.rows[0].id;
     
     // Test 1: Too many tags (should fail)
-    console.log('\n📋 Test 1: Reject task with 21 tags');
+    logger.info('Test 1: Reject task with 21 tags');
     try {
       await pool.query(
         `INSERT INTO tasks (title, status, reporter_id, tags)
@@ -39,20 +39,20 @@ async function testConstraints() {
           Array.from({ length: 21 }, (_, i) => `tag${i + 1}`)
         ]
       );
-      console.log('   ❌ FAILED: Should have rejected 21 tags');
+      logger.warn('FAILED: Should have rejected 21 tags');
       testsFailed++;
     } catch (error) {
       if (error.code === '23514') {
-        console.log('   ✅ PASSED: 21 tags rejected');
+        logger.info('PASSED: 21 tags rejected');
         testsPassed++;
       } else {
-        console.log(`   ❌ FAILED: Unexpected error: ${error.message}`);
+        logger.warn(`FAILED: Unexpected error: ${error.message}`);
         testsFailed++;
       }
     }
     
     // Test 2: Tag too long (should fail)
-    console.log('\n📋 Test 2: Reject task with tag > 50 characters');
+    logger.info('Test 2: Reject task with tag > 50 characters');
     try {
       await pool.query(
         `INSERT INTO tasks (title, status, reporter_id, tags)
@@ -64,20 +64,20 @@ async function testConstraints() {
           ['this-is-a-very-long-tag-that-exceeds-the-fifty-character-limit-for-tags']
         ]
       );
-      console.log('   ❌ FAILED: Should have rejected long tag');
+      logger.warn('FAILED: Should have rejected long tag');
       testsFailed++;
     } catch (error) {
       if (error.code === '23514') {
-        console.log('   ✅ PASSED: Long tag rejected');
+        logger.info('PASSED: Long tag rejected');
         testsPassed++;
       } else {
-        console.log(`   ❌ FAILED: Unexpected error: ${error.message}`);
+        logger.warn(`FAILED: Unexpected error: ${error.message}`);
         testsFailed++;
       }
     }
     
     // Test 3: Uppercase tags (should fail)
-    console.log('\n📋 Test 3: Reject task with uppercase tags');
+    logger.info('Test 3: Reject task with uppercase tags');
     try {
       await pool.query(
         `INSERT INTO tasks (title, status, reporter_id, tags)
@@ -89,20 +89,20 @@ async function testConstraints() {
           ['UpperCase', 'MixedCase']
         ]
       );
-      console.log('   ❌ FAILED: Should have rejected uppercase tags');
+      logger.warn('FAILED: Should have rejected uppercase tags');
       testsFailed++;
     } catch (error) {
       if (error.code === '23514') {
-        console.log('   ✅ PASSED: Uppercase tags rejected');
+        logger.info('PASSED: Uppercase tags rejected');
         testsPassed++;
       } else {
-        console.log(`   ❌ FAILED: Unexpected error: ${error.message}`);
+        logger.warn(`FAILED: Unexpected error: ${error.message}`);
         testsFailed++;
       }
     }
     
     // Test 4: Empty tags (should fail)
-    console.log('\n📋 Test 4: Reject task with empty tags');
+    logger.info('Test 4: Reject task with empty tags');
     try {
       await pool.query(
         `INSERT INTO tasks (title, status, reporter_id, tags)
@@ -114,100 +114,100 @@ async function testConstraints() {
           ['valid-tag', '   ', 'another-tag']
         ]
       );
-      console.log('   ❌ FAILED: Should have rejected empty tags');
+      logger.warn('FAILED: Should have rejected empty tags');
       testsFailed++;
     } catch (error) {
       if (error.code === '23514') {
-        console.log('   ✅ PASSED: Empty tags rejected');
+        logger.info('PASSED: Empty tags rejected');
         testsPassed++;
       } else {
-        console.log(`   ❌ FAILED: Unexpected error: ${error.message}`);
+        logger.warn(`FAILED: Unexpected error: ${error.message}`);
         testsFailed++;
       }
     }
     
     // Test 5: Invalid email format (should fail)
-    console.log('\n📋 Test 5: Reject user with invalid email');
+    logger.info('Test 5: Reject user with invalid email');
     try {
       await pool.query(
         `INSERT INTO users (name, email, password_hash, role)
          VALUES ($1, $2, $3, $4)`,
         ['Test User', 'invalid-email', 'dummy-hash', 'user']
       );
-      console.log('   ❌ FAILED: Should have rejected invalid email');
+      logger.warn('FAILED: Should have rejected invalid email');
       testsFailed++;
     } catch (error) {
       if (error.code === '23514') {
-        console.log('   ✅ PASSED: Invalid email rejected');
+        logger.info('PASSED: Invalid email rejected');
         testsPassed++;
       } else {
-        console.log(`   ❌ FAILED: Unexpected error: ${error.message}`);
+        logger.warn(`FAILED: Unexpected error: ${error.message}`);
         testsFailed++;
       }
     }
     
     // Test 6: done_at without DONE status (should fail)
-    console.log('\n📋 Test 6: Reject task with done_at but status != DONE');
+    logger.info('Test 6: Reject task with done_at but status != DONE');
     try {
       await pool.query(
         `INSERT INTO tasks (title, status, reporter_id, done_at)
          VALUES ($1, $2, $3, $4)`,
         ['Test Task - Invalid done_at', 'TO DO', testUserId, new Date()]
       );
-      console.log('   ❌ FAILED: Should have rejected done_at on non-DONE task');
+      logger.warn('FAILED: Should have rejected done_at on non-DONE task');
       testsFailed++;
     } catch (error) {
       if (error.code === '23514') {
-        console.log('   ✅ PASSED: done_at on non-DONE task rejected');
+        logger.info('PASSED: done_at on non-DONE task rejected');
         testsPassed++;
       } else {
-        console.log(`   ❌ FAILED: Unexpected error: ${error.message}`);
+        logger.warn(`FAILED: Unexpected error: ${error.message}`);
         testsFailed++;
       }
     }
     
     // Test 7: archived_at without ARCHIVE status (should fail)
-    console.log('\n📋 Test 7: Reject task with archived_at but status != ARCHIVE');
+    logger.info('Test 7: Reject task with archived_at but status != ARCHIVE');
     try {
       await pool.query(
         `INSERT INTO tasks (title, status, reporter_id, archived_at)
          VALUES ($1, $2, $3, $4)`,
         ['Test Task - Invalid archived_at', 'TO DO', testUserId, new Date()]
       );
-      console.log('   ❌ FAILED: Should have rejected archived_at on non-ARCHIVE task');
+      logger.warn('FAILED: Should have rejected archived_at on non-ARCHIVE task');
       testsFailed++;
     } catch (error) {
       if (error.code === '23514') {
-        console.log('   ✅ PASSED: archived_at on non-ARCHIVE task rejected');
+        logger.info('PASSED: archived_at on non-ARCHIVE task rejected');
         testsPassed++;
       } else {
-        console.log(`   ❌ FAILED: Unexpected error: ${error.message}`);
+        logger.warn(`FAILED: Unexpected error: ${error.message}`);
         testsFailed++;
       }
     }
     
     // Test 8: Empty title (should fail)
-    console.log('\n📋 Test 8: Reject task with empty title');
+    logger.info('Test 8: Reject task with empty title');
     try {
       await pool.query(
         `INSERT INTO tasks (title, status, reporter_id)
          VALUES ($1, $2, $3)`,
         ['   ', 'TO DO', testUserId]
       );
-      console.log('   ❌ FAILED: Should have rejected empty title');
+      logger.warn('FAILED: Should have rejected empty title');
       testsFailed++;
     } catch (error) {
       if (error.code === '23514') {
-        console.log('   ✅ PASSED: Empty title rejected');
+        logger.info('PASSED: Empty title rejected');
         testsPassed++;
       } else {
-        console.log(`   ❌ FAILED: Unexpected error: ${error.message}`);
+        logger.warn(`FAILED: Unexpected error: ${error.message}`);
         testsFailed++;
       }
     }
     
     // Test 9: Valid task with tags (should succeed)
-    console.log('\n📋 Test 9: Accept valid task with tags');
+    logger.info('Test 9: Accept valid task with tags');
     try {
       const result = await pool.query(
         `INSERT INTO tasks (title, status, reporter_id, tags)
@@ -219,15 +219,15 @@ async function testConstraints() {
       // Clean up
       await pool.query('DELETE FROM tasks WHERE id = $1', [result.rows[0].id]);
       
-      console.log('   ✅ PASSED: Valid task with tags accepted');
+      logger.info('PASSED: Valid task with tags accepted');
       testsPassed++;
     } catch (error) {
-      console.log(`   ❌ FAILED: Should have accepted valid task: ${error.message}`);
+      logger.warn(`FAILED: Should have accepted valid task: ${error.message}`);
       testsFailed++;
     }
     
     // Test 10: Valid task with DONE status and done_at (should succeed)
-    console.log('\n📋 Test 10: Accept DONE task with done_at');
+    logger.info('Test 10: Accept DONE task with done_at');
     try {
       const result = await pool.query(
         `INSERT INTO tasks (title, status, reporter_id, done_at)
@@ -239,31 +239,30 @@ async function testConstraints() {
       // Clean up
       await pool.query('DELETE FROM tasks WHERE id = $1', [result.rows[0].id]);
       
-      console.log('   ✅ PASSED: DONE task with done_at accepted');
+      logger.info('PASSED: DONE task with done_at accepted');
       testsPassed++;
     } catch (error) {
-      console.log(`   ❌ FAILED: Should have accepted DONE task: ${error.message}`);
+      logger.warn(`FAILED: Should have accepted DONE task: ${error.message}`);
       testsFailed++;
     }
     
     // Summary
-    console.log('\n' + '═'.repeat(60));
-    console.log('📊 Test Results:');
-    console.log(`   ✅ Passed: ${testsPassed}`);
-    console.log(`   ❌ Failed: ${testsFailed}`);
-    console.log(`   Total:  ${testsPassed + testsFailed}`);
-    console.log('═'.repeat(60));
+    logger.info('Test Results', {
+      passed: testsPassed,
+      failed: testsFailed,
+      total: testsPassed + testsFailed
+    });
     
     if (testsFailed === 0) {
-      console.log('\n🎉 All tests passed!');
+      logger.info('All tests passed!');
       process.exit(0);
     } else {
-      console.log('\n⚠️  Some tests failed!');
+      logger.warn('Some tests failed!');
       process.exit(1);
     }
     
   } catch (error) {
-    console.error('\n❌ Test suite error:', error);
+    logger.error('Test suite error', { error: error.message });
     process.exit(1);
   }
 }

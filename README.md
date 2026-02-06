@@ -148,6 +148,16 @@ docker tag mosbot-api:latest ghcr.io/mosufy/mosbot-api:latest
 docker push ghcr.io/mosufy/mosbot-api:latest
 ```
 
+### Versioned build and push (recommended for Kubernetes with `imagePullPolicy: IfNotPresent`)
+
+Use a version tag so the cluster pulls the new image when you update the tag in your GitOps manifest (otherwise the node may keep using a cached image).
+
+```bash
+./build-and-push.sh 2026.2.6
+```
+
+Then in your cluster config (e.g. `homelab-gitops/apps/homelab/mosbot/overlays/homelab/kustomization.yaml`) set `newTag: "2026.2.6"`, sync, and restart the deployment.
+
 ### Multi-platform build (Kubernetes / mixed architectures)
 
 If you see **"no match for platform in manifest"** when pulling on a cluster, the image was built for a different CPU architecture (e.g. ARM64 on Apple Silicon) than the cluster nodes (often AMD64). Build and push a multi-platform image so both work:
@@ -398,6 +408,53 @@ npm run lint:fix
 # Run linter for CI/CD (fails on warnings)
 npm run lint:check
 ```
+
+### Test Categories
+
+The project includes two types of tests:
+
+#### Unit Tests
+
+Unit tests run without external dependencies and test individual functions and modules in isolation.
+
+- **Location**: `src/**/__tests__/*.test.js`
+- **Run with**: `npm test` (no database required)
+- **Coverage**: Core utilities, validation logic, and pure functions
+
+#### Integration Tests
+
+Integration tests require a running PostgreSQL database to test API endpoints and database interactions.
+
+- **Location**: `src/**/__tests__/*.integration.test.js`
+- **Run with**: `npm test` (will skip if database not configured)
+- **Setup Requirements**:
+  1. **Configure test database** in `.env`:
+     ```bash
+     # Test database credentials
+     TEST_DB_HOST=localhost
+     TEST_DB_PORT=5432
+     TEST_DB_NAME=mosbot_test
+     TEST_DB_USER=postgres
+     TEST_DB_PASSWORD=your_password
+     ```
+  2. **Create test database**:
+     ```bash
+     # Using psql
+     psql -U postgres -c "CREATE DATABASE mosbot_test;"
+     
+     # Or using Docker
+     docker run -d --name mosbot-test-db \
+       -e POSTGRES_DB=mosbot_test \
+       -e POSTGRES_PASSWORD=your_password \
+       -p 5432:5432 \
+       postgres:15-alpine
+     ```
+  3. **Run migrations** on test database:
+     ```bash
+     NODE_ENV=test npm run migrate
+     ```
+
+**Note**: Integration tests will be skipped automatically if the test database is not configured. This is expected behavior and allows unit tests to run in CI/CD environments without database setup.
 
 ## 🔒 Security
 

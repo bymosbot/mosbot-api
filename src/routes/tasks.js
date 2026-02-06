@@ -610,6 +610,304 @@ router.get('/:id/activity', optionalAuth, validateUUID('id'), async (req, res, n
   }
 });
 
+// GET /api/v1/tasks/:id/comments - Get comments for a task
+router.get('/:id/comments', optionalAuth, validateUUID('id'), async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const { limit = 100, offset = 0 } = req.query;
+
+    // First check if task exists
+    const taskExists = await pool.query('SELECT id FROM tasks WHERE id = $1', [id]);
+    if (taskExists.rows.length === 0) {
+      return res.status(404).json({ error: { message: 'Task not found', status: 404 } });
+    }
+
+    const result = await pool.query(
+      `
+        SELECT
+          c.*,
+          u.name as author_name,
+          u.email as author_email,
+          u.avatar_url as author_avatar
+        FROM task_comments c
+        LEFT JOIN users u ON c.author_id = u.id
+        WHERE c.task_id = $1
+        ORDER BY c.created_at ASC
+        LIMIT $2 OFFSET $3
+      `,
+      [id, parseInt(limit), parseInt(offset)]
+    );
+
+    res.json({
+      data: result.rows,
+      pagination: {
+        limit: parseInt(limit),
+        offset: parseInt(offset),
+        total: result.rowCount
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/v1/tasks/:id/comments - Create a new comment on a task
+router.post('/:id/comments', optionalAuth, validateUUID('id'), async (req, res, next) => {
+  let client;
+  try {
+    const { id } = req.params;
+    const { body } = req.body || {};
+
+    if (!req.user?.id) {
+      return res.status(401).json({ error: { message: 'Authorization required', status: 401 } });
+    }
+
+    const commentBody = typeof body === 'string' ? body.trim() : '';
+    if (!commentBody) {
+      return res.status(400).json({ error: { message: 'Comment body is required', status: 400 } });
+    }
+
+    if (commentBody.length > 5000) {
+      return res.status(400).json({ error: { message: 'Comment body must be 5000 characters or less', status: 400 } });
+    }
+
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    // First check if task exists
+    const taskExists = await client.query('SELECT id FROM tasks WHERE id = $1', [id]);
+    if (taskExists.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: { message: 'Task not found', status: 404 } });
+    }
+
+    const insertResult = await client.query(
+      `
+        INSERT INTO task_comments (task_id, author_id, body)
+        VALUES ($1, $2, $3)
+        RETURNING *
+      `,
+      [id, req.user.id, commentBody]
+    );
+
+    const inserted = insertResult.rows[0];
+
+    const commentWithAuthor = await client.query(
+      `
+        SELECT
+          c.*,
+          u.name as author_name,
+          u.email as author_email,
+          u.avatar_url as author_avatar
+        FROM task_comments c
+        LEFT JOIN users u ON c.author_id = u.id
+        WHERE c.id = $1
+      `,
+      [inserted.id]
+    );
+
+    // Log comment creation to task_logs
+    await logTaskEvent(
+      client,
+      id,
+      'COMMENT_CREATED',
+      'api',
+      req.user.id,
+      null,
+      null,
+      { comment_id: inserted.id, comment_body: commentBody }
+    );
+
+    await client.query('COMMIT');
+
+    return res.status(201).json({ data: commentWithAuthor.rows[0] });
+  } catch (error) {
+    if (client) {
+      await client.query('ROLLBACK');
+    }
+    return next(error);
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+// PATCH /api/v1/tasks/:taskId/comments/:commentId - Update a comment
+router.patch('/:taskId/comments/:commentId', optionalAuth, validateUUID('taskId'), validateUUID('commentId'), async (req, res, next) => {
+  let client;
+  try {
+    const { taskId, commentId } = req.params;
+    const { body } = req.body || {};
+
+    if (!req.user?.id) {
+      return res.status(401).json({ error: { message: 'Authorization required', status: 401 } });
+    }
+
+    const commentBody = typeof body === 'string' ? body.trim() : '';
+    if (!commentBody) {
+      return res.status(400).json({ error: { message: 'Comment body is required', status: 400 } });
+    }
+
+    if (commentBody.length > 5000) {
+      return res.status(400).json({ error: { message: 'Comment body must be 5000 characters or less', status: 400 } });
+    }
+
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    // Fetch existing comment with author and user info
+    const existingResult = await client.query(
+      `
+        SELECT c.*, u.role as author_role
+        FROM task_comments c
+        LEFT JOIN users u ON c.author_id = u.id
+        WHERE c.id = $1 AND c.task_id = $2
+      `,
+      [commentId, taskId]
+    );
+
+    if (existingResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: { message: 'Comment not found', status: 404 } });
+    }
+
+    const existingComment = existingResult.rows[0];
+
+    // Authorization check: only author or admin/owner can edit
+    const isAuthor = existingComment.author_id === req.user.id;
+    const isAdminOrOwner = req.user.role === 'admin' || req.user.role === 'owner';
+
+    if (!isAuthor && !isAdminOrOwner) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: { message: 'Only the comment author or an admin can edit this comment', status: 403 } });
+    }
+
+    // Update comment
+    const updateResult = await client.query(
+      `
+        UPDATE task_comments
+        SET body = $1, updated_at = CURRENT_TIMESTAMP
+        WHERE id = $2
+        RETURNING *
+      `,
+      [commentBody, commentId]
+    );
+
+    const updated = updateResult.rows[0];
+
+    // Fetch updated comment with author info
+    const commentWithAuthor = await client.query(
+      `
+        SELECT
+          c.*,
+          u.name as author_name,
+          u.email as author_email,
+          u.avatar_url as author_avatar
+        FROM task_comments c
+        LEFT JOIN users u ON c.author_id = u.id
+        WHERE c.id = $1
+      `,
+      [commentId]
+    );
+
+    // Log comment update to task_logs
+    await logTaskEvent(
+      client,
+      taskId,
+      'COMMENT_UPDATED',
+      'api',
+      req.user.id,
+      { comment_body: existingComment.body },
+      { comment_body: commentBody },
+      { comment_id: commentId }
+    );
+
+    await client.query('COMMIT');
+
+    return res.json({ data: commentWithAuthor.rows[0] });
+  } catch (error) {
+    if (client) {
+      await client.query('ROLLBACK');
+    }
+    return next(error);
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
+// DELETE /api/v1/tasks/:taskId/comments/:commentId - Delete a comment
+router.delete('/:taskId/comments/:commentId', optionalAuth, validateUUID('taskId'), validateUUID('commentId'), async (req, res, next) => {
+  let client;
+  try {
+    const { taskId, commentId } = req.params;
+
+    if (!req.user?.id) {
+      return res.status(401).json({ error: { message: 'Authorization required', status: 401 } });
+    }
+
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    // Fetch existing comment with author info
+    const existingResult = await client.query(
+      `
+        SELECT c.*, u.role as author_role
+        FROM task_comments c
+        LEFT JOIN users u ON c.author_id = u.id
+        WHERE c.id = $1 AND c.task_id = $2
+      `,
+      [commentId, taskId]
+    );
+
+    if (existingResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: { message: 'Comment not found', status: 404 } });
+    }
+
+    const existingComment = existingResult.rows[0];
+
+    // Authorization check: only author or admin/owner can delete
+    const isAuthor = existingComment.author_id === req.user.id;
+    const isAdminOrOwner = req.user.role === 'admin' || req.user.role === 'owner';
+
+    if (!isAuthor && !isAdminOrOwner) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: { message: 'Only the comment author or an admin can delete this comment', status: 403 } });
+    }
+
+    // Log comment deletion to task_logs before deleting
+    await logTaskEvent(
+      client,
+      taskId,
+      'COMMENT_DELETED',
+      'api',
+      req.user.id,
+      { comment_body: existingComment.body },
+      null,
+      { comment_id: commentId }
+    );
+
+    // Delete comment
+    await client.query('DELETE FROM task_comments WHERE id = $1', [commentId]);
+
+    await client.query('COMMIT');
+
+    return res.status(204).send();
+  } catch (error) {
+    if (client) {
+      await client.query('ROLLBACK');
+    }
+    return next(error);
+  } finally {
+    if (client) {
+      client.release();
+    }
+  }
+});
+
 // DELETE /api/v1/tasks/:id - Delete a task
 router.delete('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
   const client = await pool.connect();

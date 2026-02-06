@@ -7,7 +7,6 @@ const logger = require('../../utils/logger');
 
 // Apply auth middleware to all routes
 router.use(authenticateToken);
-router.use(requireAdmin);
 
 // Middleware to validate UUID
 const validateUUID = (paramName) => (req, res, next) => {
@@ -20,7 +19,7 @@ const validateUUID = (paramName) => (req, res, next) => {
   next();
 };
 
-// GET /api/v1/admin/users - List all users
+// GET /api/v1/admin/users - List all users (all authenticated users can view)
 router.get('/', async (req, res, next) => {
   try {
     const { limit = 100, offset = 0 } = req.query;
@@ -29,19 +28,25 @@ router.get('/', async (req, res, next) => {
     const limitNum = Math.max(1, Math.min(parseInt(limit) || 100, 1000));
     const offsetNum = Math.max(0, parseInt(offset) || 0);
     
-    const result = await pool.query(`
-      SELECT id, name, email, avatar_url, role, active, created_at, updated_at
-      FROM users
-      ORDER BY created_at DESC
-      LIMIT $1 OFFSET $2
-    `, [limitNum, offsetNum]);
+    // Get total count and paginated results in parallel
+    const [countResult, dataResult] = await Promise.all([
+      pool.query('SELECT COUNT(*) as total FROM users'),
+      pool.query(`
+        SELECT id, name, email, avatar_url, role, active, created_at, updated_at
+        FROM users
+        ORDER BY created_at DESC
+        LIMIT $1 OFFSET $2
+      `, [limitNum, offsetNum])
+    ]);
+    
+    const total = parseInt(countResult.rows[0].total, 10);
     
     res.json({
-      data: result.rows,
+      data: dataResult.rows,
       pagination: {
         limit: limitNum,
         offset: offsetNum,
-        total: result.rowCount
+        total: total
       }
     });
   } catch (error) {
@@ -49,7 +54,7 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// GET /api/v1/admin/users/:id - Get a single user by ID
+// GET /api/v1/admin/users/:id - Get a single user by ID (all authenticated users can view)
 router.get('/:id', validateUUID('id'), async (req, res, next) => {
   try {
     const { id } = req.params;
@@ -69,8 +74,8 @@ router.get('/:id', validateUUID('id'), async (req, res, next) => {
   }
 });
 
-// POST /api/v1/admin/users - Create a new user (admin only)
-router.post('/', async (req, res, next) => {
+// POST /api/v1/admin/users - Create a new user (admin/owner only)
+router.post('/', requireAdmin, async (req, res, next) => {
   try {
     const { name, email, password, role = 'user', avatar_url } = req.body;
     
@@ -127,8 +132,8 @@ router.post('/', async (req, res, next) => {
   }
 });
 
-// PUT /api/v1/admin/users/:id - Update a user
-router.put('/:id', validateUUID('id'), async (req, res, next) => {
+// PUT /api/v1/admin/users/:id - Update a user (admin/owner only)
+router.put('/:id', requireAdmin, validateUUID('id'), async (req, res, next) => {
   try {
     const { id } = req.params;
     const { name, email, password, role, avatar_url, active } = req.body;
@@ -207,11 +212,15 @@ router.put('/:id', validateUUID('id'), async (req, res, next) => {
     }
     
     // Only admin and user roles can be assigned via admin endpoints (not owner)
+    // Exception: owner can keep their own role when updating themselves
     const validRoles = ['admin', 'user'];
     if (role !== undefined && !validRoles.includes(role)) {
-      return res.status(400).json({ 
-        error: { message: 'Invalid role. Only admin and user roles can be assigned.', status: 400 } 
-      });
+      // Allow 'owner' role only if target user is already owner
+      if (role !== 'owner' || targetUser.role !== 'owner') {
+        return res.status(400).json({ 
+          error: { message: 'Invalid role. Only admin and user roles can be assigned.', status: 400 } 
+        });
+      }
     }
     
     // Prevent deactivating yourself
@@ -298,8 +307,8 @@ router.put('/:id', validateUUID('id'), async (req, res, next) => {
   }
 });
 
-// DELETE /api/v1/admin/users/:id - Delete a user
-router.delete('/:id', validateUUID('id'), async (req, res, next) => {
+// DELETE /api/v1/admin/users/:id - Delete a user (admin/owner only)
+router.delete('/:id', requireAdmin, validateUUID('id'), async (req, res, next) => {
   try {
     const { id } = req.params;
     

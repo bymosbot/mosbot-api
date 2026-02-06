@@ -1,36 +1,42 @@
 require('dotenv').config();
 const readline = require('readline');
 const pool = require('./pool');
-const migrate = require('./migrate');
+const runMigrations = require('./runMigrations');
+const logger = require('../utils/logger');
 
 // Safety checks
 function isProductionEnvironment() {
   const nodeEnv = process.env.NODE_ENV?.toLowerCase();
   const dbName = process.env.DB_NAME?.toLowerCase();
   const dbHost = process.env.DB_HOST?.toLowerCase();
-  
+
   // Check NODE_ENV
   if (nodeEnv === 'production') {
     return true;
   }
-  
+
   // Check for production-like database names
   if (dbName && (dbName.includes('prod') || dbName.includes('production'))) {
     return true;
   }
-  
+
   // Check for production-like hosts (not localhost)
-  if (dbHost && dbHost !== 'localhost' && dbHost !== '127.0.0.1' && !dbHost.startsWith('postgres')) {
+  if (
+    dbHost &&
+    dbHost !== 'localhost' &&
+    dbHost !== '127.0.0.1' &&
+    !dbHost.startsWith('postgres')
+  ) {
     return true;
   }
-  
+
   return false;
 }
 
 function askConfirmation(question) {
   const rl = readline.createInterface({
     input: process.stdin,
-    output: process.stdout
+    output: process.stdout,
   });
 
   return new Promise((resolve) => {
@@ -45,97 +51,100 @@ async function confirmReset() {
   const isProd = isProductionEnvironment();
   const dbName = process.env.DB_NAME || 'unknown';
   const dbHost = process.env.DB_HOST || 'unknown';
-  
-  console.log('\n⚠️  WARNING: Database Reset');
-  console.log('═══════════════════════════════════════════════════════');
-  console.log(`Database: ${dbName}`);
-  console.log(`Host: ${dbHost}`);
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  
+
+  logger.warn('WARNING: Database Reset', {
+    database: dbName,
+    host: dbHost,
+    environment: process.env.NODE_ENV || 'development'
+  });
+
   if (isProd) {
-    console.log('\n🚨 PRODUCTION ENVIRONMENT DETECTED 🚨');
-    console.log('This will DELETE ALL DATA in the production database!');
-    console.log('═══════════════════════════════════════════════════════\n');
-    
+    logger.warn('PRODUCTION ENVIRONMENT DETECTED - This will DELETE ALL DATA in the production database!');
+
     // Check for --force flag
     const hasForceFlag = process.argv.includes('--force');
-    
+
     if (!hasForceFlag) {
-      console.error('❌ Reset blocked: Production environment detected');
-      console.error('   To proceed, you must use: npm run db:reset -- --force');
-      console.error('   AND confirm when prompted.\n');
+      logger.error('Reset blocked: Production environment detected', {
+        message: 'To proceed, you must use: npm run db:reset -- --force AND confirm when prompted'
+      });
       process.exit(1);
     }
-    
+
     // Double confirmation for production
     const confirm1 = await askConfirmation(
       '⚠️  Type "RESET PRODUCTION" (all caps) to confirm: '
     );
-    
+
     if (confirm1 !== 'reset production') {
-      console.log('❌ Reset cancelled - confirmation did not match');
+      logger.warn('Reset cancelled - confirmation did not match');
       process.exit(0);
     }
-    
+
     const confirm2 = await askConfirmation(
       '⚠️  Type the database name to confirm: '
     );
-    
+
     if (confirm2 !== dbName.toLowerCase()) {
-      console.log('❌ Reset cancelled - database name did not match');
+      logger.warn('Reset cancelled - database name did not match');
       process.exit(0);
     }
   } else {
-    console.log('\n⚠️  This will DELETE ALL DATA in the database!');
-    console.log('═══════════════════════════════════════════════════════\n');
-    
+    logger.warn('This will DELETE ALL DATA in the database!');
+
     const confirm = await askConfirmation('Type "yes" to confirm: ');
-    
+
     if (confirm !== 'yes') {
-      console.log('❌ Reset cancelled');
+      logger.warn('Reset cancelled');
       process.exit(0);
     }
   }
-  
+
   // Final countdown
-  console.log('\n🔄 Starting reset in 3 seconds...');
-  console.log('   Press Ctrl+C to cancel\n');
-  
-  await new Promise(resolve => setTimeout(resolve, 3000));
+  logger.info('Starting reset in 3 seconds... Press Ctrl+C to cancel');
+
+  await new Promise((resolve) => setTimeout(resolve, 3000));
 }
 
 async function reset() {
   let client;
   let clientReleased = false;
-  
+
   try {
     client = await pool.connect();
-    console.log('🔄 Resetting database...');
-    
+    logger.info('Resetting database...');
+
     // Drop all tables in correct order (respecting foreign key constraints)
     await client.query('DROP TABLE IF EXISTS task_logs CASCADE');
     await client.query('DROP TABLE IF EXISTS tasks CASCADE');
     await client.query('DROP TABLE IF EXISTS activity_logs CASCADE');
     await client.query('DROP TABLE IF EXISTS users CASCADE');
-    
+    await client.query('DROP TABLE IF EXISTS schema_migrations CASCADE');
+
     // Drop functions
     await client.query('DROP FUNCTION IF EXISTS update_updated_at() CASCADE');
-    await client.query('DROP FUNCTION IF EXISTS validate_tags_length(TEXT[]) CASCADE');
-    await client.query('DROP FUNCTION IF EXISTS validate_tags_lowercase(TEXT[]) CASCADE');
-    await client.query('DROP FUNCTION IF EXISTS validate_tags_not_empty(TEXT[]) CASCADE');
-    
-    console.log('✅ Database tables dropped');
-    
+    await client.query(
+      'DROP FUNCTION IF EXISTS validate_tags_length(TEXT[]) CASCADE'
+    );
+    await client.query(
+      'DROP FUNCTION IF EXISTS validate_tags_lowercase(TEXT[]) CASCADE'
+    );
+    await client.query(
+      'DROP FUNCTION IF EXISTS validate_tags_not_empty(TEXT[]) CASCADE'
+    );
+
+    logger.info('Database tables dropped');
+
     // Release client before running migrations
     client.release();
     clientReleased = true;
-    
+
     // Run migrations to recreate schema (don't end pool, we'll do it in finally)
-    await migrate({ endPool: false });
-    
-    console.log('✅ Database reset completed successfully');
+    await runMigrations({ endPool: false });
+
+    logger.info('Database reset completed successfully');
   } catch (error) {
-    console.error('❌ Database reset failed:', error);
+    logger.error('Database reset failed', { error: error.message });
     throw error;
   } finally {
     // Only release if not already released
@@ -155,7 +164,7 @@ if (require.main === module) {
     .then(() => reset())
     .then(() => process.exit(0))
     .catch((error) => {
-      console.error('❌ Error:', error.message);
+      logger.error('Error during reset', { error: error.message });
       process.exit(1);
     });
 }

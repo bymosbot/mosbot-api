@@ -1,4 +1,5 @@
 const pool = require('../db/pool');
+const logger = require('../utils/logger');
 
 // Postgres advisory lock ID for archiver job (unique 64-bit integer)
 const ARCHIVER_LOCK_ID = 123456789;
@@ -18,11 +19,11 @@ async function archiveDoneTasks(archiveAfterDays = 7) {
     const lockResult = await client.query('SELECT pg_try_advisory_lock($1) as acquired', [ARCHIVER_LOCK_ID]);
     
     if (!lockResult.rows[0].acquired) {
-      console.log('⏭️  Archive job already running on another instance, skipping...');
+      logger.info('Archive job already running on another instance, skipping...');
       return 0;
     }
     
-    console.log('🔒 Acquired advisory lock for archive job');
+    logger.info('Acquired advisory lock for archive job');
     
     // Start transaction for archiving + logging
     await client.query('BEGIN');
@@ -54,7 +55,7 @@ async function archiveDoneTasks(archiveAfterDays = 7) {
       archivedCount = result.rows.length;
       
       if (archivedCount > 0) {
-        console.log(`📦 Archived ${archivedCount} task(s):`);
+        logger.info(`Archived ${archivedCount} task(s)`, { count: archivedCount });
         
         // Insert log entry for each archived task
         for (const task of result.rows) {
@@ -69,10 +70,10 @@ async function archiveDoneTasks(archiveAfterDays = 7) {
             JSON.stringify({ status: 'ARCHIVE', archived_at: new Date().toISOString() })
           ]);
           
-          console.log(`   - ${task.title} (${task.id})`);
+          logger.info(`Archived task: ${task.title}`, { taskId: task.id });
         }
       } else {
-        console.log('✅ No tasks to archive');
+        logger.info('No tasks to archive');
       }
       
       await client.query('COMMIT');
@@ -83,17 +84,17 @@ async function archiveDoneTasks(archiveAfterDays = 7) {
     
     // Release advisory lock
     await client.query('SELECT pg_advisory_unlock($1)', [ARCHIVER_LOCK_ID]);
-    console.log('🔓 Released advisory lock');
+    logger.info('Released advisory lock');
     
     return archivedCount;
   } catch (error) {
-    console.error('❌ Archive job failed:', error);
+    logger.error('Archive job failed', { error: error.message });
     
     // Try to release lock on error
     try {
       await client.query('SELECT pg_advisory_unlock($1)', [ARCHIVER_LOCK_ID]);
     } catch (unlockError) {
-      console.error('Failed to release advisory lock:', unlockError);
+      logger.error('Failed to release advisory lock', { error: unlockError.message });
     }
     
     throw error;

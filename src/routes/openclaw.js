@@ -204,7 +204,7 @@ function normalizeAndValidateWorkspacePath(inputPath) {
 }
 
 // GET /api/v1/openclaw/workspace/files
-// List workspace files
+// List workspace files (all authenticated users can view metadata)
 router.get('/workspace/files', requireAuth, async (req, res, next) => {
   try {
     const { path: inputPath = '/', recursive = 'false' } = req.query;
@@ -212,6 +212,7 @@ router.get('/workspace/files', requireAuth, async (req, res, next) => {
     
     logger.info('Listing OpenClaw workspace files', { 
       userId: req.user.id, 
+      role: req.user.role,
       path: workspacePath,
       recursive 
     });
@@ -228,8 +229,8 @@ router.get('/workspace/files', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/v1/openclaw/workspace/files/content
-// Read file content
-router.get('/workspace/files/content', requireAuth, async (req, res, next) => {
+// Read file content (admin/owner only)
+router.get('/workspace/files/content', requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const { path: inputPath } = req.query;
     

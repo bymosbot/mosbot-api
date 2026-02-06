@@ -1,5 +1,6 @@
 const { Pool } = require('pg');
 const { types } = require('pg');
+const logger = require('../utils/logger');
 
 // Override the default parser for TIMESTAMP (type ID 1114)
 // Parse timestamps as ISO strings instead of Date objects to preserve timezone info
@@ -21,11 +22,11 @@ const pool = new Pool({
 pool.on('connect', (client) => {
   // Set timezone to UTC for all connections to ensure consistent timestamp handling
   client.query('SET timezone = "UTC"');
-  console.log('✅ Database connected');
+  logger.info('Database connected');
 });
 
 pool.on('error', (err) => {
-  console.error('❌ Unexpected database error:', err);
+  logger.error('Unexpected database error', { error: err.message });
   process.exit(-1);
 });
 
