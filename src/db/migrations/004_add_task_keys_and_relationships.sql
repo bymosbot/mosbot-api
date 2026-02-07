@@ -22,8 +22,8 @@ WHERE task_number IS NULL;
 ALTER TABLE tasks ALTER COLUMN task_number SET NOT NULL;
 ALTER TABLE tasks ADD CONSTRAINT unique_task_number UNIQUE (task_number);
 
--- Set sequence to continue from max existing number
-SELECT setval('task_number_seq', (SELECT COALESCE(MAX(task_number), 0) FROM tasks));
+-- Set sequence to continue from max existing number (minimum 1)
+SELECT setval('task_number_seq', GREATEST((SELECT COALESCE(MAX(task_number), 0) FROM tasks), 1));
 
 -- Set default for new tasks
 ALTER TABLE tasks ALTER COLUMN task_number SET DEFAULT nextval('task_number_seq');

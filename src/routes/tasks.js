@@ -110,10 +110,13 @@ router.get('/', optionalAuth, async (req, res, next) => {
         u_reporter.name as reporter_name,
         u_reporter.email as reporter_email,
         u_assignee.name as assignee_name,
-        u_assignee.email as assignee_email
+        u_assignee.email as assignee_email,
+        parent_task.task_number as parent_task_number,
+        parent_task.title as parent_task_title
       FROM tasks t
       LEFT JOIN users u_reporter ON t.reporter_id = u_reporter.id
       LEFT JOIN users u_assignee ON t.assignee_id = u_assignee.id
+      LEFT JOIN tasks parent_task ON t.parent_task_id = parent_task.id
       WHERE 1=1
     `;
     
@@ -178,10 +181,13 @@ router.get('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
         u_reporter.avatar_url as reporter_avatar,
         u_assignee.name as assignee_name,
         u_assignee.email as assignee_email,
-        u_assignee.avatar_url as assignee_avatar
+        u_assignee.avatar_url as assignee_avatar,
+        parent_task.task_number as parent_task_number,
+        parent_task.title as parent_task_title
       FROM tasks t
       LEFT JOIN users u_reporter ON t.reporter_id = u_reporter.id
       LEFT JOIN users u_assignee ON t.assignee_id = u_assignee.id
+      LEFT JOIN tasks parent_task ON t.parent_task_id = parent_task.id
       WHERE t.id = $1
     `, [id]);
     
@@ -343,10 +349,13 @@ router.post('/', optionalAuth, async (req, res, next) => {
         u_reporter.name as reporter_name,
         u_reporter.email as reporter_email,
         u_assignee.name as assignee_name,
-        u_assignee.email as assignee_email
+        u_assignee.email as assignee_email,
+        parent_task.task_number as parent_task_number,
+        parent_task.title as parent_task_title
       FROM tasks t
       LEFT JOIN users u_reporter ON t.reporter_id = u_reporter.id
       LEFT JOIN users u_assignee ON t.assignee_id = u_assignee.id
+      LEFT JOIN tasks parent_task ON t.parent_task_id = parent_task.id
       WHERE t.id = $1
     `, [newTask.id]);
     
@@ -648,7 +657,24 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
     
     await client.query('COMMIT');
     
-    res.json({ data: updatedTask });
+    // Fetch the complete task with reporter, assignee, and parent task information
+    const completeTask = await client.query(`
+      SELECT 
+        t.*,
+        u_reporter.name as reporter_name,
+        u_reporter.email as reporter_email,
+        u_assignee.name as assignee_name,
+        u_assignee.email as assignee_email,
+        parent_task.task_number as parent_task_number,
+        parent_task.title as parent_task_title
+      FROM tasks t
+      LEFT JOIN users u_reporter ON t.reporter_id = u_reporter.id
+      LEFT JOIN users u_assignee ON t.assignee_id = u_assignee.id
+      LEFT JOIN tasks parent_task ON t.parent_task_id = parent_task.id
+      WHERE t.id = $1
+    `, [id]);
+    
+    res.json({ data: completeTask.rows[0] });
   } catch (error) {
     await client.query('ROLLBACK');
     next(error);
@@ -1092,11 +1118,14 @@ router.get('/:id/dependencies', optionalAuth, validateUUID('id'), async (req, re
         u_reporter.name as reporter_name,
         u_reporter.email as reporter_email,
         u_assignee.name as assignee_name,
-        u_assignee.email as assignee_email
+        u_assignee.email as assignee_email,
+        parent_task.task_number as parent_task_number,
+        parent_task.title as parent_task_title
       FROM task_dependencies td
       JOIN tasks t ON td.depends_on_task_id = t.id
       LEFT JOIN users u_reporter ON t.reporter_id = u_reporter.id
       LEFT JOIN users u_assignee ON t.assignee_id = u_assignee.id
+      LEFT JOIN tasks parent_task ON t.parent_task_id = parent_task.id
       WHERE td.task_id = $1
     `, [id]);
     
@@ -1107,11 +1136,14 @@ router.get('/:id/dependencies', optionalAuth, validateUUID('id'), async (req, re
         u_reporter.name as reporter_name,
         u_reporter.email as reporter_email,
         u_assignee.name as assignee_name,
-        u_assignee.email as assignee_email
+        u_assignee.email as assignee_email,
+        parent_task.task_number as parent_task_number,
+        parent_task.title as parent_task_title
       FROM task_dependencies td
       JOIN tasks t ON td.task_id = t.id
       LEFT JOIN users u_reporter ON t.reporter_id = u_reporter.id
       LEFT JOIN users u_assignee ON t.assignee_id = u_assignee.id
+      LEFT JOIN tasks parent_task ON t.parent_task_id = parent_task.id
       WHERE td.depends_on_task_id = $1
     `, [id]);
     
