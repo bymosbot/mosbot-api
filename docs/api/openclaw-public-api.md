@@ -35,6 +35,11 @@ This document describes the **public HTTP API contract** OpenClaw can use to int
   - [POST `/tasks/:id/comments`](#post-tasksidcomments)
   - [PATCH `/tasks/:taskId/comments/:commentId`](#patch-taskstaskidcommentscommentid)
   - [DELETE `/tasks/:taskId/comments/:commentId`](#delete-taskstaskidcommentscommentid)
+  - [GET `/tasks/key/:key`](#get-taskskeykey)
+  - [GET `/tasks/:id/subtasks`](#get-tasksidsubtasks)
+  - [GET `/tasks/:id/dependencies`](#get-tasksiddependencies)
+  - [POST `/tasks/:id/dependencies`](#post-tasksiddependencies)
+  - [DELETE `/tasks/:id/dependencies/:dependsOnId`](#delete-tasksiddependenciesdependsonid)
 - [Users (for assignee resolution)](#users-for-assignee-resolution)
   - [GET `/users`](#get-users)
   - [GET `/users/:id`](#get-usersid)
@@ -123,17 +128,20 @@ Notes:
 Core fields (always present unless noted):
 
 - `id` (uuid)
+- `task_number` (integer, auto-incremented, unique) - Used to generate human-friendly task keys like `TASK-1234`
 - `title` (string, max 500)
 - `summary` (string | null)
 - `status` (enum, see below)
 - `priority` (`High` | `Medium` | `Low` | null)
-- `type` (`task` | `bug` | `feature` | `improvement` | `research`)
+- `type` (`task` | `bug` | `feature` | `improvement` | `research` | `epic`)
 - `reporter_id` (uuid | null)
 - `assignee_id` (uuid | null)
 - `tags` (string[] | null)
 - `due_date` (timestamp | null)
 - `done_at` (timestamp | null)
 - `archived_at` (timestamp | null)
+- `parent_task_id` (uuid | null) - For epic/subtask relationships
+- `parent_sort_order` (integer | null) - Sort order for subtasks under the same parent
 - `created_at` (timestamp)
 - `updated_at` (timestamp)
 
@@ -141,12 +149,13 @@ Denormalized/joined fields (may appear on some endpoints):
 
 - `reporter_name`, `reporter_email`, `reporter_avatar`
 - `assignee_name`, `assignee_email`, `assignee_avatar`
+- `parent_task_number`, `parent_task_title` - Information about the parent task (if applicable)
 
 ### Enums
 
 - **Task status**: `PLANNING` | `TO DO` | `IN PROGRESS` | `DONE` | `ARCHIVE`
 - **Task priority**: `High` | `Medium` | `Low`
-- **Task type**: `task` | `bug` | `feature` | `improvement` | `research`
+- **Task type**: `task` | `bug` | `feature` | `improvement` | `research` | `epic`
 
 ### Tags normalization rules
 
@@ -300,7 +309,7 @@ curl "<MOSBOT_API_ORIGIN>/api/v1/tasks?status=IN%20PROGRESS&limit=50" \
 
 ### GET `/tasks/:id`
 
-Fetch a single task.
+Fetch a single task by UUID.
 
 Response `200`:
 
@@ -311,6 +320,29 @@ Response `200`:
 Errors:
 
 - `400` invalid UUID
+- `404` task not found
+
+### GET `/tasks/key/:key`
+
+Fetch a single task by its human-friendly key (e.g., `TASK-1234`).
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "id": "uuid",
+    "task_number": 1234,
+    "title": "Example task",
+    "status": "IN PROGRESS",
+    ...
+  }
+}
+```
+
+Errors:
+
+- `400` invalid task key format (expected `TASK-{number}`)
 - `404` task not found
 
 ### POST `/tasks`
@@ -329,7 +361,8 @@ Request body:
   "reporter_id": "uuid (optional)",
   "assignee_id": "uuid (optional)",
   "due_date": "2026-02-05T18:00:00.000Z (optional)",
-  "tags": ["OpenClaw", "Docs", "API"]
+  "tags": ["OpenClaw", "Docs", "API"],
+  "parent_task_id": "uuid (optional)"
 }
 ```
 
@@ -339,6 +372,8 @@ Behavior notes:
 - If `type` is omitted it defaults to `task`.
 - If `reporter_id` is omitted and a JWT is provided, Mosbot sets `reporter_id` to the authenticated user.
 - `tags` are normalized (see rules above).
+- `parent_task_id` creates a parent/child relationship (useful for epics with subtasks).
+- `task_number` is automatically assigned from a sequence and cannot be set manually.
 
 Response `201`:
 
@@ -346,13 +381,17 @@ Response `201`:
 { "data": { /* Task */ } }
 ```
 
+Errors:
+
+- `400` validation errors (missing title, invalid enum values, parent task not found, etc.)
+
 ### PUT `/tasks/:id` (and PATCH `/tasks/:id`)
 
 Update a task. `PATCH` is supported and behaves the same as `PUT`.
 
 You may send any subset of these fields:
 
-- `title`, `summary`, `status`, `priority`, `type`, `reporter_id`, `assignee_id`, `due_date`, `tags`
+- `title`, `summary`, `status`, `priority`, `type`, `reporter_id`, `assignee_id`, `due_date`, `tags`, `parent_task_id`
 
 Status transition side-effects:
 
@@ -369,7 +408,7 @@ Response `200`:
 
 Errors:
 
-- `400` invalid UUID, invalid enum, invalid tags, or no fields to update
+- `400` invalid UUID, invalid enum, invalid tags, parent task not found, or no fields to update
 - `404` task not found
 
 ### DELETE `/tasks/:id`
@@ -377,6 +416,112 @@ Errors:
 Delete a task.
 
 Response `204` with no body.
+
+### GET `/tasks/:id/subtasks`
+
+Get all subtasks (children) of a task, ordered by `parent_sort_order` and `created_at`.
+
+Response `200`:
+
+```json
+{
+  "data": [
+    {
+      "id": "uuid",
+      "task_number": 1235,
+      "title": "Subtask 1",
+      "parent_task_id": "uuid",
+      "parent_sort_order": 1,
+      ...
+    }
+  ]
+}
+```
+
+Errors:
+
+- `400` invalid UUID
+- `404` task not found
+
+### GET `/tasks/:id/dependencies`
+
+Get task dependencies (both tasks this task depends on, and tasks that depend on this task).
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "depends_on": [
+      {
+        "id": "uuid",
+        "task_number": 1230,
+        "title": "Blocking task",
+        ...
+      }
+    ],
+    "dependents": [
+      {
+        "id": "uuid",
+        "task_number": 1240,
+        "title": "Dependent task",
+        ...
+      }
+    ]
+  }
+}
+```
+
+Errors:
+
+- `400` invalid UUID
+- `404` task not found
+
+### POST `/tasks/:id/dependencies`
+
+Add a dependency relationship (this task depends on another task).
+
+Request body:
+
+```json
+{
+  "depends_on_task_id": "uuid"
+}
+```
+
+Validation:
+
+- Prevents self-dependencies (task cannot depend on itself)
+- Prevents circular dependencies (A→B→C→A cycles)
+- Prevents duplicate dependencies
+
+Response `201`:
+
+```json
+{
+  "data": {
+    "task_id": "uuid",
+    "depends_on_task_id": "uuid"
+  }
+}
+```
+
+Errors:
+
+- `400` invalid UUID, missing `depends_on_task_id`, self-dependency, or circular dependency
+- `404` one or both tasks not found
+- `409` dependency already exists
+
+### DELETE `/tasks/:id/dependencies/:dependsOnId`
+
+Remove a dependency relationship.
+
+Response `204` with no body.
+
+Errors:
+
+- `400` invalid UUID
+- `404` dependency not found
 
 ### GET `/tasks/:id/history`
 
@@ -835,7 +980,7 @@ Errors:
 
 ### POST `/openclaw/workspace/files`
 
-Create or update a file (admin/owner only).
+Create a new file (admin/owner only). **Fails if file already exists** - use `PUT` to update existing files.
 
 Request body:
 
@@ -851,6 +996,7 @@ Notes:
 
 - `encoding` defaults to `utf8` if omitted
 - Path is normalized and validated (no path traversal allowed)
+- Checks for file existence before creation to prevent accidental overwrites
 
 Response `201`:
 
@@ -868,11 +1014,12 @@ Errors:
 - `400` missing path or content, or invalid path
 - `401` authentication required
 - `403` admin/owner role required
+- `409` file already exists (use `PUT` to update)
 - `503` OpenClaw service not configured or unavailable
 
 ### PUT `/openclaw/workspace/files`
 
-Update existing file (admin/owner only).
+Update an existing file (admin/owner only). **Fails if file does not exist** - use `POST` to create new files.
 
 Request body:
 
@@ -900,7 +1047,7 @@ Errors:
 - `400` missing path or content, or invalid path
 - `401` authentication required
 - `403` admin/owner role required
-- `404` file not found
+- `404` file not found (use `POST` to create)
 - `503` OpenClaw service not configured or unavailable
 
 ### DELETE `/openclaw/workspace/files`
@@ -968,7 +1115,8 @@ Errors:
 ### Tasks (Authenticated)
 
 - `GET /api/v1/tasks` - List tasks
-- `GET /api/v1/tasks/:id` - Get single task
+- `GET /api/v1/tasks/:id` - Get single task by UUID
+- `GET /api/v1/tasks/key/:key` - Get single task by key (e.g., TASK-1234)
 - `POST /api/v1/tasks` - Create task
 - `PUT /api/v1/tasks/:id` - Update task (full)
 - `PATCH /api/v1/tasks/:id` - Update task (partial)
@@ -979,6 +1127,10 @@ Errors:
 - `POST /api/v1/tasks/:id/comments` - Create comment (auth required)
 - `PATCH /api/v1/tasks/:taskId/comments/:commentId` - Update comment (author or admin/owner)
 - `DELETE /api/v1/tasks/:taskId/comments/:commentId` - Delete comment (author or admin/owner)
+- `GET /api/v1/tasks/:id/subtasks` - Get subtasks (children) of a task
+- `GET /api/v1/tasks/:id/dependencies` - Get task dependencies
+- `POST /api/v1/tasks/:id/dependencies` - Add a dependency
+- `DELETE /api/v1/tasks/:id/dependencies/:dependsOnId` - Remove a dependency
 
 ### Users (Authenticated)
 
@@ -1001,7 +1153,7 @@ Errors:
 
 - `GET /api/v1/openclaw/workspace/files` - List files (all users)
 - `GET /api/v1/openclaw/workspace/files/content` - Read file (admin/owner)
-- `POST /api/v1/openclaw/workspace/files` - Create/update file (admin/owner)
-- `PUT /api/v1/openclaw/workspace/files` - Update file (admin/owner)
+- `POST /api/v1/openclaw/workspace/files` - Create file (admin/owner, fails if exists)
+- `PUT /api/v1/openclaw/workspace/files` - Update file (admin/owner, fails if not exists)
 - `DELETE /api/v1/openclaw/workspace/files` - Delete file (admin/owner)
 - `GET /api/v1/openclaw/workspace/status` - Get sync status (all users)
