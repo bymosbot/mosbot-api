@@ -16,6 +16,17 @@ const validateUUID = (paramName) => (req, res, next) => {
   next();
 };
 
+// Middleware to validate task key format (TASK-1234)
+const validateTaskKey = (paramName) => (req, res, next) => {
+  const key = req.params[paramName];
+  const keyRegex = /^TASK-\d+$/i;
+  
+  if (!keyRegex.test(key)) {
+    return res.status(400).json({ error: { message: 'Invalid task key format. Expected TASK-{number}', status: 400 } });
+  }
+  next();
+};
+
 // Optional auth middleware - sets req.user if valid token present, but doesn't reject
 const optionalAuth = (req, res, next) => {
   const authHeader = req.headers.authorization;
@@ -55,7 +66,7 @@ async function logTaskEvent(client, taskId, eventType, source, actorId, oldValue
 function computeTaskDiff(oldTask, newTask) {
   const oldValues = {};
   const newValues = {};
-  const fieldsToCompare = ['title', 'summary', 'status', 'priority', 'type', 'reporter_id', 'assignee_id', 'due_date', 'done_at', 'archived_at', 'tags'];
+  const fieldsToCompare = ['title', 'summary', 'status', 'priority', 'type', 'reporter_id', 'assignee_id', 'due_date', 'done_at', 'archived_at', 'tags', 'parent_task_id'];
   
   for (const field of fieldsToCompare) {
     const oldVal = oldTask[field];
@@ -184,6 +195,38 @@ router.get('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
   }
 });
 
+// GET /api/v1/tasks/key/:key - Get a single task by key (TASK-1234)
+router.get('/key/:key', optionalAuth, validateTaskKey('key'), async (req, res, next) => {
+  try {
+    const { key } = req.params;
+    // Extract the number from TASK-1234 format
+    const taskNumber = parseInt(key.split('-')[1], 10);
+    
+    const result = await pool.query(`
+      SELECT 
+        t.*,
+        u_reporter.name as reporter_name,
+        u_reporter.email as reporter_email,
+        u_reporter.avatar_url as reporter_avatar,
+        u_assignee.name as assignee_name,
+        u_assignee.email as assignee_email,
+        u_assignee.avatar_url as assignee_avatar
+      FROM tasks t
+      LEFT JOIN users u_reporter ON t.reporter_id = u_reporter.id
+      LEFT JOIN users u_assignee ON t.assignee_id = u_assignee.id
+      WHERE t.task_number = $1
+    `, [taskNumber]);
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: { message: 'Task not found', status: 404 } });
+    }
+    
+    res.json({ data: result.rows[0] });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // POST /api/v1/tasks - Create a new task
 router.post('/', optionalAuth, async (req, res, next) => {
   const client = await pool.connect();
@@ -197,7 +240,8 @@ router.post('/', optionalAuth, async (req, res, next) => {
       reporter_id,
       assignee_id,
       due_date,
-      tags
+      tags,
+      parent_task_id
     } = req.body;
     
     // Validation
@@ -219,7 +263,7 @@ router.post('/', optionalAuth, async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Invalid priority', status: 400 } });
     }
     
-    const validTypes = ['task', 'bug', 'feature', 'improvement', 'research'];
+    const validTypes = ['task', 'bug', 'feature', 'improvement', 'research', 'epic'];
     if (type && !validTypes.includes(type)) {
       return res.status(400).json({ error: { message: 'Invalid type', status: 400 } });
     }
@@ -245,16 +289,24 @@ router.post('/', optionalAuth, async (req, res, next) => {
       }
     }
     
+    // Validate parent_task_id if provided
+    if (parent_task_id) {
+      const parentResult = await pool.query('SELECT id FROM tasks WHERE id = $1', [parent_task_id]);
+      if (parentResult.rows.length === 0) {
+        return res.status(400).json({ error: { message: 'Parent task not found', status: 400 } });
+      }
+    }
+    
     // Auto-set reporter_id to authenticated user if not provided
     const finalReporterId = reporter_id || req.user?.id || null;
     
     await client.query('BEGIN');
     
     const result = await client.query(`
-      INSERT INTO tasks (title, summary, status, priority, type, reporter_id, assignee_id, due_date, tags)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+      INSERT INTO tasks (title, summary, status, priority, type, reporter_id, assignee_id, due_date, tags, parent_task_id)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       RETURNING *
-    `, [title, summary, status, priority, type, finalReporterId, assignee_id, due_date, normalizedTags]);
+    `, [title, summary, status, priority, type, finalReporterId, assignee_id, due_date, normalizedTags, parent_task_id || null]);
     
     const newTask = result.rows[0];
     
@@ -268,7 +320,8 @@ router.post('/', optionalAuth, async (req, res, next) => {
       reporter_id: newTask.reporter_id,
       assignee_id: newTask.assignee_id,
       due_date: newTask.due_date,
-      tags: newTask.tags
+      tags: newTask.tags,
+      parent_task_id: newTask.parent_task_id
     };
     
     await logTaskEvent(
@@ -320,14 +373,15 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
       reporter_id,
       assignee_id,
       due_date,
-      tags
+      tags,
+      parent_task_id
     } = req.body;
     
     await client.query('BEGIN');
     
     // Fetch full existing task for diff computation
     const existing = await client.query(
-      'SELECT id, title, summary, status, priority, type, reporter_id, assignee_id, due_date, done_at, archived_at, tags FROM tasks WHERE id = $1',
+      'SELECT id, title, summary, status, priority, type, reporter_id, assignee_id, due_date, done_at, archived_at, tags, parent_task_id FROM tasks WHERE id = $1',
       [id]
     );
     if (existing.rows.length === 0) {
@@ -361,10 +415,76 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
       return res.status(400).json({ error: { message: 'Invalid priority', status: 400 } });
     }
     
-    const validTypes = ['task', 'bug', 'feature', 'improvement', 'research'];
+    const validTypes = ['task', 'bug', 'feature', 'improvement', 'research', 'epic'];
     if (type && !validTypes.includes(type)) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: { message: 'Invalid type', status: 400 } });
+    }
+    
+    // Validate parent_task_id if provided
+    if (parent_task_id !== undefined && parent_task_id !== null) {
+      const parentResult = await client.query('SELECT id FROM tasks WHERE id = $1', [parent_task_id]);
+      if (parentResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: { message: 'Parent task not found', status: 400 } });
+      }
+      // Prevent task from being its own parent
+      if (parent_task_id === id) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: { message: 'Task cannot be its own parent', status: 400 } });
+      }
+    }
+    
+    // Hard blocking: Check dependencies before allowing status change to IN PROGRESS or DONE
+    if (status && (status === 'IN PROGRESS' || status === 'DONE') && status !== currentStatus) {
+      const blockingDeps = await client.query(`
+        SELECT 
+          t.task_number,
+          t.title,
+          t.status
+        FROM task_dependencies td
+        JOIN tasks t ON td.depends_on_task_id = t.id
+        WHERE td.task_id = $1 AND t.status != 'DONE'
+      `, [id]);
+      
+      if (blockingDeps.rows.length > 0) {
+        const blockingTasks = blockingDeps.rows.map(t => `TASK-${t.task_number} (${t.title})`).join(', ');
+        const blockingTaskKeys = blockingDeps.rows.map(t => `TASK-${t.task_number}`);
+        
+        await client.query('ROLLBACK');
+        
+        // Log blocking event after rollback (use separate query so it persists)
+        const actorId = req.user?.id || null;
+        try {
+          await pool.query(`
+            INSERT INTO task_logs (task_id, event_type, source, actor_id, old_values, new_values, meta)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
+          `, [
+            id,
+            'STATUS_CHANGE_BLOCKED',
+            'API',
+            actorId,
+            JSON.stringify({ status: currentStatus }),
+            JSON.stringify({ attempted_status: status }),
+            JSON.stringify({ blocking_tasks: blockingTaskKeys })
+          ]);
+        } catch (logError) {
+          // Don't fail the request if logging fails, but log the error
+          console.error('Failed to log dependency blocking event:', logError);
+        }
+        
+        return res.status(409).json({ 
+          error: { 
+            message: `Cannot move to ${status}. Task is blocked by: ${blockingTasks}`,
+            status: 409,
+            blocking_tasks: blockingDeps.rows.map(t => ({
+              key: `TASK-${t.task_number}`,
+              title: t.title,
+              status: t.status
+            }))
+          }
+        });
+      }
     }
     
     // Validate and normalize tags
@@ -456,6 +576,12 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
     if (normalizedTags !== undefined) {
       updates.push(`tags = $${paramCount}`);
       params.push(normalizedTags);
+      paramCount++;
+    }
+    
+    if (parent_task_id !== undefined) {
+      updates.push(`parent_task_id = $${paramCount}`);
+      params.push(parent_task_id);
       paramCount++;
     }
     
@@ -945,6 +1071,199 @@ router.delete('/:id', optionalAuth, validateUUID('id'), async (req, res, next) =
     next(error);
   } finally {
     client.release();
+  }
+});
+
+// GET /api/v1/tasks/:id/dependencies - Get task dependencies
+router.get('/:id/dependencies', optionalAuth, validateUUID('id'), async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if task exists
+    const taskExists = await pool.query('SELECT id, task_number FROM tasks WHERE id = $1', [id]);
+    if (taskExists.rows.length === 0) {
+      return res.status(404).json({ error: { message: 'Task not found', status: 404 } });
+    }
+    
+    // Get tasks this task depends on (blockers)
+    const dependsOn = await pool.query(`
+      SELECT 
+        t.*,
+        u_reporter.name as reporter_name,
+        u_reporter.email as reporter_email,
+        u_assignee.name as assignee_name,
+        u_assignee.email as assignee_email
+      FROM task_dependencies td
+      JOIN tasks t ON td.depends_on_task_id = t.id
+      LEFT JOIN users u_reporter ON t.reporter_id = u_reporter.id
+      LEFT JOIN users u_assignee ON t.assignee_id = u_assignee.id
+      WHERE td.task_id = $1
+    `, [id]);
+    
+    // Get tasks that depend on this task (dependents)
+    const dependents = await pool.query(`
+      SELECT 
+        t.*,
+        u_reporter.name as reporter_name,
+        u_reporter.email as reporter_email,
+        u_assignee.name as assignee_name,
+        u_assignee.email as assignee_email
+      FROM task_dependencies td
+      JOIN tasks t ON td.task_id = t.id
+      LEFT JOIN users u_reporter ON t.reporter_id = u_reporter.id
+      LEFT JOIN users u_assignee ON t.assignee_id = u_assignee.id
+      WHERE td.depends_on_task_id = $1
+    `, [id]);
+    
+    res.json({
+      data: {
+        depends_on: dependsOn.rows,
+        dependents: dependents.rows
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/v1/tasks/:id/dependencies - Add a dependency
+router.post('/:id/dependencies', optionalAuth, validateUUID('id'), async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const { id } = req.params;
+    const { depends_on_task_id } = req.body;
+    
+    if (!depends_on_task_id) {
+      return res.status(400).json({ error: { message: 'depends_on_task_id is required', status: 400 } });
+    }
+    
+    await client.query('BEGIN');
+    
+    // Check if both tasks exist
+    const taskCheck = await client.query(
+      'SELECT id, task_number FROM tasks WHERE id = $1 OR id = $2',
+      [id, depends_on_task_id]
+    );
+    
+    if (taskCheck.rows.length !== 2) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: { message: 'One or both tasks not found', status: 404 } });
+    }
+    
+    // Prevent self-dependency
+    if (id === depends_on_task_id) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: { message: 'Task cannot depend on itself', status: 400 } });
+    }
+    
+    // Check for circular dependencies
+    const hasCircular = await client.query(
+      'SELECT check_circular_dependency($1, $2) as has_circular',
+      [id, depends_on_task_id]
+    );
+    
+    if (hasCircular.rows[0].has_circular) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ 
+        error: { 
+          message: 'Cannot add dependency: would create a circular dependency', 
+          status: 400 
+        }
+      });
+    }
+    
+    // Check if dependency already exists
+    const existing = await client.query(
+      'SELECT 1 FROM task_dependencies WHERE task_id = $1 AND depends_on_task_id = $2',
+      [id, depends_on_task_id]
+    );
+    
+    if (existing.rows.length > 0) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ error: { message: 'Dependency already exists', status: 409 } });
+    }
+    
+    // Add the dependency
+    await client.query(
+      'INSERT INTO task_dependencies (task_id, depends_on_task_id) VALUES ($1, $2)',
+      [id, depends_on_task_id]
+    );
+    
+    await client.query('COMMIT');
+    
+    res.status(201).json({ 
+      data: { 
+        task_id: id, 
+        depends_on_task_id 
+      } 
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    next(error);
+  } finally {
+    client.release();
+  }
+});
+
+// DELETE /api/v1/tasks/:id/dependencies/:dependsOnId - Remove a dependency
+router.delete('/:id/dependencies/:dependsOnId', optionalAuth, validateUUID('id'), validateUUID('dependsOnId'), async (req, res, next) => {
+  const client = await pool.connect();
+  try {
+    const { id, dependsOnId } = req.params;
+    
+    await client.query('BEGIN');
+    
+    // Delete the dependency
+    const result = await client.query(
+      'DELETE FROM task_dependencies WHERE task_id = $1 AND depends_on_task_id = $2 RETURNING *',
+      [id, dependsOnId]
+    );
+    
+    if (result.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: { message: 'Dependency not found', status: 404 } });
+    }
+    
+    await client.query('COMMIT');
+    
+    res.status(204).send();
+  } catch (error) {
+    await client.query('ROLLBACK');
+    next(error);
+  } finally {
+    client.release();
+  }
+});
+
+// GET /api/v1/tasks/:id/subtasks - Get subtasks of a task (children)
+router.get('/:id/subtasks', optionalAuth, validateUUID('id'), async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    // Check if task exists
+    const taskExists = await pool.query('SELECT id FROM tasks WHERE id = $1', [id]);
+    if (taskExists.rows.length === 0) {
+      return res.status(404).json({ error: { message: 'Task not found', status: 404 } });
+    }
+    
+    // Get subtasks ordered by parent_sort_order
+    const result = await pool.query(`
+      SELECT 
+        t.*,
+        u_reporter.name as reporter_name,
+        u_reporter.email as reporter_email,
+        u_assignee.name as assignee_name,
+        u_assignee.email as assignee_email
+      FROM tasks t
+      LEFT JOIN users u_reporter ON t.reporter_id = u_reporter.id
+      LEFT JOIN users u_assignee ON t.assignee_id = u_assignee.id
+      WHERE t.parent_task_id = $1
+      ORDER BY t.parent_sort_order NULLS LAST, t.created_at ASC
+    `, [id]);
+    
+    res.json({ data: result.rows });
+  } catch (error) {
+    next(error);
   }
 });
 
