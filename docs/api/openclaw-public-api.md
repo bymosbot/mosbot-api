@@ -142,6 +142,13 @@ Core fields (always present unless noted):
 - `archived_at` (timestamp | null)
 - `parent_task_id` (uuid | null) - For epic/subtask relationships
 - `parent_sort_order` (integer | null) - Sort order for subtasks under the same parent
+- `agent_cost_usd` (decimal | null) - AI agent cost in USD
+- `agent_tokens_input` (integer | null) - Input tokens used
+- `agent_tokens_input_cache` (integer | null) - Cached input tokens used
+- `agent_tokens_output` (integer | null) - Output tokens generated
+- `agent_tokens_output_cache` (integer | null) - Cached output tokens used
+- `agent_model` (string | null) - AI model name (e.g., "claude-3-sonnet")
+- `agent_model_provider` (string | null) - AI model provider (e.g., "anthropic", "openai")
 - `created_at` (timestamp)
 - `updated_at` (timestamp)
 
@@ -362,7 +369,14 @@ Request body:
   "assignee_id": "uuid (optional)",
   "due_date": "2026-02-05T18:00:00.000Z (optional)",
   "tags": ["OpenClaw", "Docs", "API"],
-  "parent_task_id": "uuid (optional)"
+  "parent_task_id": "uuid (optional)",
+  "agent_cost_usd": 0.0523 (optional),
+  "agent_tokens_input": 1500 (optional),
+  "agent_tokens_input_cache": 500 (optional),
+  "agent_tokens_output": 800 (optional),
+  "agent_tokens_output_cache": 200 (optional),
+  "agent_model": "claude-3-sonnet (optional)",
+  "agent_model_provider": "anthropic (optional)"
 }
 ```
 
@@ -392,6 +406,15 @@ Update a task. `PATCH` is supported and behaves the same as `PUT`.
 You may send any subset of these fields:
 
 - `title`, `summary`, `status`, `priority`, `type`, `reporter_id`, `assignee_id`, `due_date`, `tags`, `parent_task_id`
+- `agent_cost_usd`, `agent_tokens_input`, `agent_tokens_input_cache`, `agent_tokens_output`, `agent_tokens_output_cache`, `agent_model`, `agent_model_provider`
+
+Agent usage fields notes:
+
+- These fields track AI model usage and cost per task
+- All agent fields are optional and can be set to `null`
+- `agent_cost_usd` should be a decimal number (e.g., `0.0523`)
+- Token fields should be non-negative integers
+- Model and provider should be strings identifying the AI service used
 
 Status transition side-effects:
 

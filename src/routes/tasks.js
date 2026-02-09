@@ -247,7 +247,14 @@ router.post('/', optionalAuth, async (req, res, next) => {
       assignee_id,
       due_date,
       tags,
-      parent_task_id
+      parent_task_id,
+      agent_cost_usd,
+      agent_tokens_input,
+      agent_tokens_input_cache,
+      agent_tokens_output,
+      agent_tokens_output_cache,
+      agent_model,
+      agent_model_provider
     } = req.body;
     
     // Validation
@@ -272,6 +279,30 @@ router.post('/', optionalAuth, async (req, res, next) => {
     const validTypes = ['task', 'bug', 'feature', 'improvement', 'research', 'epic'];
     if (type && !validTypes.includes(type)) {
       return res.status(400).json({ error: { message: 'Invalid type', status: 400 } });
+    }
+    
+    // Validate agent usage fields
+    if (agent_cost_usd !== undefined && agent_cost_usd !== null) {
+      const cost = parseFloat(agent_cost_usd);
+      if (isNaN(cost) || cost < 0) {
+        return res.status(400).json({ error: { message: 'agent_cost_usd must be a non-negative number', status: 400 } });
+      }
+    }
+    
+    const tokenFields = [
+      { name: 'agent_tokens_input', value: agent_tokens_input },
+      { name: 'agent_tokens_input_cache', value: agent_tokens_input_cache },
+      { name: 'agent_tokens_output', value: agent_tokens_output },
+      { name: 'agent_tokens_output_cache', value: agent_tokens_output_cache }
+    ];
+    
+    for (const field of tokenFields) {
+      if (field.value !== undefined && field.value !== null) {
+        const tokenCount = parseInt(field.value);
+        if (isNaN(tokenCount) || tokenCount < 0 || !Number.isInteger(parseFloat(field.value))) {
+          return res.status(400).json({ error: { message: `${field.name} must be a non-negative integer`, status: 400 } });
+        }
+      }
     }
     
     // Validate and normalize tags
@@ -309,10 +340,14 @@ router.post('/', optionalAuth, async (req, res, next) => {
     await client.query('BEGIN');
     
     const result = await client.query(`
-      INSERT INTO tasks (title, summary, status, priority, type, reporter_id, assignee_id, due_date, tags, parent_task_id)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      INSERT INTO tasks (title, summary, status, priority, type, reporter_id, assignee_id, due_date, tags, parent_task_id, 
+        agent_cost_usd, agent_tokens_input, agent_tokens_input_cache, agent_tokens_output, agent_tokens_output_cache, 
+        agent_model, agent_model_provider)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
       RETURNING *
-    `, [title, summary, status, priority, type, finalReporterId, assignee_id, due_date, normalizedTags, parent_task_id || null]);
+    `, [title, summary, status, priority, type, finalReporterId, assignee_id, due_date, normalizedTags, parent_task_id || null,
+        agent_cost_usd ?? null, agent_tokens_input ?? null, agent_tokens_input_cache ?? null, 
+        agent_tokens_output ?? null, agent_tokens_output_cache ?? null, agent_model ?? null, agent_model_provider ?? null]);
     
     const newTask = result.rows[0];
     
@@ -383,7 +418,14 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
       assignee_id,
       due_date,
       tags,
-      parent_task_id
+      parent_task_id,
+      agent_cost_usd,
+      agent_tokens_input,
+      agent_tokens_input_cache,
+      agent_tokens_output,
+      agent_tokens_output_cache,
+      agent_model,
+      agent_model_provider
     } = req.body;
     
     await client.query('BEGIN');
@@ -428,6 +470,32 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
     if (type && !validTypes.includes(type)) {
       await client.query('ROLLBACK');
       return res.status(400).json({ error: { message: 'Invalid type', status: 400 } });
+    }
+    
+    // Validate agent usage fields
+    if (agent_cost_usd !== undefined && agent_cost_usd !== null) {
+      const cost = parseFloat(agent_cost_usd);
+      if (isNaN(cost) || cost < 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: { message: 'agent_cost_usd must be a non-negative number', status: 400 } });
+      }
+    }
+    
+    const tokenFieldsUpdate = [
+      { name: 'agent_tokens_input', value: agent_tokens_input },
+      { name: 'agent_tokens_input_cache', value: agent_tokens_input_cache },
+      { name: 'agent_tokens_output', value: agent_tokens_output },
+      { name: 'agent_tokens_output_cache', value: agent_tokens_output_cache }
+    ];
+    
+    for (const field of tokenFieldsUpdate) {
+      if (field.value !== undefined && field.value !== null) {
+        const tokenCount = parseInt(field.value);
+        if (isNaN(tokenCount) || tokenCount < 0 || !Number.isInteger(parseFloat(field.value))) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: { message: `${field.name} must be a non-negative integer`, status: 400 } });
+        }
+      }
     }
     
     // Validate parent_task_id if provided
@@ -591,6 +659,49 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
     if (parent_task_id !== undefined) {
       updates.push(`parent_task_id = $${paramCount}`);
       params.push(parent_task_id);
+      paramCount++;
+    }
+    
+    // Handle agent usage fields
+    if (agent_cost_usd !== undefined) {
+      updates.push(`agent_cost_usd = $${paramCount}`);
+      params.push(agent_cost_usd);
+      paramCount++;
+    }
+    
+    if (agent_tokens_input !== undefined) {
+      updates.push(`agent_tokens_input = $${paramCount}`);
+      params.push(agent_tokens_input);
+      paramCount++;
+    }
+    
+    if (agent_tokens_input_cache !== undefined) {
+      updates.push(`agent_tokens_input_cache = $${paramCount}`);
+      params.push(agent_tokens_input_cache);
+      paramCount++;
+    }
+    
+    if (agent_tokens_output !== undefined) {
+      updates.push(`agent_tokens_output = $${paramCount}`);
+      params.push(agent_tokens_output);
+      paramCount++;
+    }
+    
+    if (agent_tokens_output_cache !== undefined) {
+      updates.push(`agent_tokens_output_cache = $${paramCount}`);
+      params.push(agent_tokens_output_cache);
+      paramCount++;
+    }
+    
+    if (agent_model !== undefined) {
+      updates.push(`agent_model = $${paramCount}`);
+      params.push(agent_model);
+      paramCount++;
+    }
+    
+    if (agent_model_provider !== undefined) {
+      updates.push(`agent_model_provider = $${paramCount}`);
+      params.push(agent_model_provider);
       paramCount++;
     }
     
