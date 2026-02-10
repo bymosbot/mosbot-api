@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const logger = require('../utils/logger');
 const path = require('path');
 const { requireAdmin } = require('./auth');
+const { makeOpenClawRequest } = require('../services/openclawWorkspaceClient');
 
 // Auth middleware - require valid JWT
 const requireAuth = (req, res, next) => {
@@ -28,161 +29,6 @@ const requireAuth = (req, res, next) => {
     });
   }
 };
-
-// Helper to sleep for a given number of milliseconds
-function sleep(ms) {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-// Helper to check if an error is retryable
-function isRetryableError(error) {
-  // Retry on timeout errors
-  if (error.name === 'AbortError' || error.name === 'TimeoutError') {
-    return true;
-  }
-  
-  // Retry on connection errors
-  if (error.message.includes('fetch failed') || error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-    return true;
-  }
-  
-  // Retry on 503 Service Unavailable (transient server errors)
-  if (error.status === 503 && error.code !== 'SERVICE_NOT_CONFIGURED') {
-    return true;
-  }
-  
-  return false;
-}
-
-// Helper to make requests to OpenClaw workspace service with retry logic
-async function makeOpenClawRequest(method, path, body = null, retryCount = 0) {
-  const maxRetries = 3;
-  const baseDelayMs = 500; // Base delay of 500ms
-  
-  // Only use Kubernetes default if explicitly in production environment
-  // In development, require explicit configuration to avoid connection errors
-  const isProduction = process.env.NODE_ENV === 'production';
-  const openclawUrl = process.env.OPENCLAW_WORKSPACE_URL || 
-    (isProduction ? 'http://openclaw-workspace.agents.svc.cluster.local:8080' : null);
-  const openclawToken = process.env.OPENCLAW_WORKSPACE_TOKEN;
-  
-  // Check if OpenClaw is configured (in local dev, URL should be explicitly set)
-  if (!openclawUrl || openclawUrl === '') {
-    const err = new Error('OpenClaw workspace service is not configured. Set OPENCLAW_WORKSPACE_URL to enable.');
-    err.status = 503;
-    err.code = 'SERVICE_NOT_CONFIGURED';
-    throw err;
-  }
-  
-  const url = `${openclawUrl}${path}`;
-  const options = {
-    method,
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    // Add timeout to prevent hanging requests (10 seconds)
-    signal: AbortSignal.timeout(10000),
-  };
-  
-  // Add auth token if configured
-  if (openclawToken) {
-    options.headers['Authorization'] = `Bearer ${openclawToken}`;
-  }
-  
-  if (body) {
-    options.body = JSON.stringify(body);
-  }
-  
-  try {
-    const response = await fetch(url, options);
-    
-    if (!response.ok) {
-      const errorText = await response.text();
-      const err = new Error(`OpenClaw workspace service error: ${response.status} ${errorText}`);
-      err.status = response.status;
-      err.code = 'OPENCLAW_SERVICE_ERROR';
-      
-      // Retry on 503 if we haven't exceeded max retries
-      if (isRetryableError(err) && retryCount < maxRetries) {
-        const delayMs = baseDelayMs * Math.pow(2, retryCount); // Exponential backoff
-        logger.warn('OpenClaw workspace request failed, retrying', { 
-          method, 
-          path, 
-          url,
-          retryCount: retryCount + 1,
-          maxRetries,
-          delayMs,
-          error: err.message
-        });
-        await sleep(delayMs);
-        return makeOpenClawRequest(method, path, body, retryCount + 1);
-      }
-      
-      throw err;
-    }
-    
-    // Handle 204 No Content
-    if (response.status === 204) {
-      return null;
-    }
-    
-    return await response.json();
-  } catch (error) {
-    // Handle connection/timeout errors with retry
-    if (isRetryableError(error) && retryCount < maxRetries) {
-      const delayMs = baseDelayMs * Math.pow(2, retryCount); // Exponential backoff
-      logger.warn('OpenClaw workspace request failed, retrying', { 
-        method, 
-        path, 
-        url,
-        retryCount: retryCount + 1,
-        maxRetries,
-        delayMs,
-        error: error.message,
-        errorCode: error.code
-      });
-      await sleep(delayMs);
-      return makeOpenClawRequest(method, path, body, retryCount + 1);
-    }
-    
-    // Handle connection/timeout errors (after retries exhausted)
-    if (error.name === 'AbortError' || error.name === 'TimeoutError') {
-      const err = new Error('OpenClaw workspace service request timed out');
-      err.status = 503;
-      err.code = 'SERVICE_TIMEOUT';
-      logger.error('OpenClaw workspace request timed out after retries', { method, path, url, retryCount });
-      throw err;
-    }
-    
-    // Handle fetch failures (connection refused, DNS errors, etc.) (after retries exhausted)
-    if (error.message.includes('fetch failed') || error.code === 'ECONNREFUSED' || error.code === 'ENOTFOUND') {
-      const err = new Error('OpenClaw workspace service is unavailable. This may be expected in local development.');
-      err.status = 503;
-      err.code = 'SERVICE_UNAVAILABLE';
-      logger.warn('OpenClaw workspace service unavailable after retries', { 
-        method, 
-        path, 
-        url,
-        retryCount,
-        hint: 'Set OPENCLAW_WORKSPACE_URL to disable or configure the service URL'
-      });
-      throw err;
-    }
-    
-    // Re-throw if already has status code
-    if (error.status) {
-      logger.error('OpenClaw workspace request failed', { method, path, error: error.message, status: error.status, retryCount });
-      throw error;
-    }
-    
-    // Generic error
-    const err = new Error(`OpenClaw workspace request failed: ${error.message}`);
-    err.status = 503;
-    err.code = 'SERVICE_ERROR';
-    logger.error('OpenClaw workspace request failed', { method, path, error: error.message, retryCount });
-    throw err;
-  }
-}
 
 function normalizeAndValidateWorkspacePath(inputPath) {
   const raw = typeof inputPath === 'string' && inputPath.trim() ? inputPath.trim() : '/';
@@ -399,6 +245,196 @@ router.get('/workspace/status', requireAuth, async (req, res, next) => {
     const data = await makeOpenClawRequest('GET', '/status');
     
     res.json({ data });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Helper to parse JSONL files (one JSON object per line)
+function parseJsonl(content) {
+  if (!content || typeof content !== 'string') {
+    return [];
+  }
+  
+  return content
+    .split('\n')
+    .filter(Boolean)
+    .map(line => {
+      try {
+        return JSON.parse(line);
+      } catch (_err) {
+        // Ignore malformed lines
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+
+// Helper to calculate next purge time (3 AM Asia/Singapore = 19:00 UTC)
+function getNextPurgeTime() {
+  const now = new Date();
+  const sgOffset = 8 * 60; // Singapore is UTC+8
+  
+  // Convert current time to Singapore timezone
+  const nowSg = new Date(now.getTime() + (sgOffset * 60 * 1000));
+  
+  // Get today's 3 AM in Singapore
+  const todayPurge = new Date(nowSg);
+  todayPurge.setHours(3, 0, 0, 0);
+  
+  // If we're past 3 AM today, schedule for tomorrow
+  let nextPurge = todayPurge;
+  if (nowSg >= todayPurge) {
+    nextPurge = new Date(todayPurge.getTime() + (24 * 60 * 60 * 1000));
+  }
+  
+  // Convert back to UTC
+  return new Date(nextPurge.getTime() - (sgOffset * 60 * 1000)).toISOString();
+}
+
+// GET /api/v1/openclaw/subagents
+// Get running, queued, and completed subagents from OpenClaw workspace runtime files
+router.get('/subagents', requireAuth, async (req, res, next) => {
+  try {
+    logger.info('Fetching subagent status', { userId: req.user.id });
+    
+    const { getFileContent } = require('../services/openclawWorkspaceClient');
+    
+    // Read all runtime files (fail gracefully if missing)
+    // Rethrow SERVICE_NOT_CONFIGURED so we return 503 instead of empty data
+    const wrapCatch = (p) => p.catch((err) => {
+      if (err.code === 'SERVICE_NOT_CONFIGURED') throw err;
+      return null;
+    });
+    const [spawnActiveContent, spawnRequestsContent, resultsCacheContent, activityLogContent] = await Promise.all([
+      wrapCatch(getFileContent('/runtime/mosbot/spawn-active.jsonl')),
+      wrapCatch(getFileContent('/runtime/mosbot/spawn-requests.json')),
+      wrapCatch(getFileContent('/runtime/mosbot/results-cache.jsonl')),
+      wrapCatch(getFileContent('/runtime/mosbot/activity-log.jsonl'))
+    ]);
+    
+    // Parse running subagents from spawn-active.jsonl
+    const running = parseJsonl(spawnActiveContent).map(entry => ({
+      sessionKey: entry.sessionKey || null,
+      sessionLabel: entry.sessionLabel || null,
+      taskId: entry.taskId || null,
+      status: 'RUNNING',
+      model: entry.model || null,
+      startedAt: entry.startedAt || null,
+      timeoutMinutes: entry.timeoutMinutes || null
+    }));
+    
+    // Parse queued subagents from spawn-requests.json
+    let queued = [];
+    if (spawnRequestsContent) {
+      try {
+        const spawnRequests = JSON.parse(spawnRequestsContent);
+        queued = (spawnRequests.requests || [])
+          .filter(r => r.status === 'SPAWN_QUEUED')
+          .map(r => ({
+            taskId: r.taskId || null,
+            title: r.title || null,
+            status: 'SPAWN_QUEUED',
+            model: r.model || null,
+            queuedAt: r.queuedAt || null
+          }));
+      } catch (err) {
+        // Invalid JSON, leave queued empty
+        logger.warn('Failed to parse spawn-requests.json', { error: err.message });
+      }
+    }
+    
+    // Parse activity log for timestamp enrichment
+    const activityEntries = parseJsonl(activityLogContent);
+    const activityBySession = new Map();
+    
+    activityEntries.forEach(entry => {
+      const key = entry.sessionLabel || entry.taskId;
+      if (key) {
+        if (!activityBySession.has(key)) {
+          activityBySession.set(key, []);
+        }
+        activityBySession.get(key).push(entry);
+      }
+    });
+    
+    // Parse completed subagents from results-cache.jsonl
+    const resultsEntries = parseJsonl(resultsCacheContent);
+    
+    // Dedupe by sessionLabel, keeping latest cachedAt
+    const completedMap = new Map();
+    resultsEntries.forEach(entry => {
+      const key = entry.sessionLabel;
+      if (!key) return;
+      
+      const existing = completedMap.get(key);
+      const entryCachedAt = entry.cachedAt || entry.timestamp || '';
+      
+      if (!existing || (entryCachedAt > (existing.cachedAt || existing.timestamp || ''))) {
+        completedMap.set(key, entry);
+      }
+    });
+    
+    // Map completed entries with activity log enrichment
+    const completed = Array.from(completedMap.values()).map(entry => {
+      const sessionLabel = entry.sessionLabel;
+      const taskId = entry.taskId || null;
+      const completedAt = entry.cachedAt || entry.timestamp || null;
+      
+      // Try to find start time from activity log
+      let startedAt = null;
+      let durationSeconds = null;
+      
+      const activities = activityBySession.get(sessionLabel) || activityBySession.get(taskId) || [];
+      const startEvent = activities.find(a => 
+        a.event === 'agent_start' || 
+        a.event === 'subagent_start' ||
+        (a.timestamp && !a.event)
+      );
+      
+      if (startEvent && startEvent.timestamp) {
+        startedAt = startEvent.timestamp;
+        
+        // Calculate duration if we have both start and completion times
+        if (completedAt && startedAt) {
+          try {
+            const start = new Date(startedAt).getTime();
+            const end = new Date(completedAt).getTime();
+            durationSeconds = Math.floor((end - start) / 1000);
+      } catch (_err) {
+        // Invalid date format, leave null
+          }
+        }
+      }
+      
+      return {
+        sessionLabel,
+        taskId,
+        status: 'COMPLETED',
+        outcome: entry.outcome || null,
+        startedAt,
+        completedAt,
+        durationSeconds
+      };
+    });
+    
+    // Calculate retention metadata
+    const completedRetentionDays = parseInt(process.env.SUBAGENT_RETENTION_DAYS, 10) || 30;
+    const activityLogRetentionDays = parseInt(process.env.ACTIVITY_LOG_RETENTION_DAYS, 10) || 7;
+    const nextPurgeAt = getNextPurgeTime();
+    
+    res.json({
+      data: {
+        running,
+        queued,
+        completed,
+        retention: {
+          completedRetentionDays,
+          activityLogRetentionDays,
+          nextPurgeAt
+        }
+      }
+    });
   } catch (error) {
     next(error);
   }

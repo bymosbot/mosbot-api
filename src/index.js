@@ -4,6 +4,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const cron = require('node-cron');
 const archiveDoneTasks = require('./jobs/archiveDoneTasks');
+const purgeSubagentData = require('./jobs/purgeSubagentData');
 const runMigrations = require('./db/runMigrations');
 const logger = require('./utils/logger');
 
@@ -28,6 +29,12 @@ if (ARCHIVE_AFTER_DAYS_RAW !== ARCHIVE_AFTER_DAYS) {
     { originalValue: ARCHIVE_AFTER_DAYS_RAW, adjustedValue: ARCHIVE_AFTER_DAYS }
   );
 }
+
+// Subagent retention purge configuration
+const ENABLE_SUBAGENT_RETENTION_PURGE = process.env.ENABLE_SUBAGENT_RETENTION_PURGE !== 'false'; // Default: enabled
+const SUBAGENT_RETENTION_CRON = process.env.SUBAGENT_RETENTION_CRON || '0 3 * * *'; // Default: 3 AM daily
+const SUBAGENT_RETENTION_DAYS = parseInt(process.env.SUBAGENT_RETENTION_DAYS || '30', 10);
+const ACTIVITY_LOG_RETENTION_DAYS = parseInt(process.env.ACTIVITY_LOG_RETENTION_DAYS || '7', 10);
 
 // Security middleware
 app.use(helmet());
@@ -113,6 +120,37 @@ async function start() {
       }
     } else {
       logger.info('Archive scheduler disabled');
+    }
+
+    // Start subagent retention purge scheduler
+    if (ENABLE_SUBAGENT_RETENTION_PURGE) {
+      logger.info('Subagent retention purge scheduler enabled', {
+        cron: SUBAGENT_RETENTION_CRON,
+        completedRetentionDays: SUBAGENT_RETENTION_DAYS,
+        activityLogRetentionDays: ACTIVITY_LOG_RETENTION_DAYS,
+        archiveEnabled: process.env.RETENTION_ARCHIVE_ENABLED === 'true'
+      });
+
+      cron.schedule(SUBAGENT_RETENTION_CRON, async () => {
+        logger.info('Running scheduled subagent retention purge job');
+        try {
+          await purgeSubagentData(SUBAGENT_RETENTION_DAYS, ACTIVITY_LOG_RETENTION_DAYS);
+        } catch (error) {
+          logger.error('Subagent retention purge job error', { error: error.message });
+        }
+      }, {
+        timezone: 'Asia/Singapore'
+      });
+
+      // Optional: Run once on startup for testing/immediate purge
+      if (process.env.SUBAGENT_RETENTION_ON_STARTUP === 'true') {
+        logger.info('Running subagent retention purge job on startup');
+        purgeSubagentData(SUBAGENT_RETENTION_DAYS, ACTIVITY_LOG_RETENTION_DAYS).catch((err) => {
+          logger.error('Startup subagent retention purge job failed', { error: err.message });
+        });
+      }
+    } else {
+      logger.info('Subagent retention purge scheduler disabled');
     }
   });
 }

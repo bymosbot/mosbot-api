@@ -23,6 +23,8 @@ This document describes the **public HTTP API contract** OpenClaw can use to int
   - [POST `/auth/login`](#post-authlogin)
   - [GET `/auth/me`](#get-authme)
   - [POST `/auth/verify`](#post-authverify)
+- [AI models (for task execution)](#models)
+  - [GET `/models`](#get-models)
 - [Task endpoints (OpenClaw adapter surface)](#task-endpoints-openclaw-adapter-surface)
   - [GET `/tasks`](#get-tasks)
   - [GET `/tasks/:id`](#get-tasksid)
@@ -58,6 +60,7 @@ This document describes the **public HTTP API contract** OpenClaw can use to int
   - [PUT `/openclaw/workspace/files`](#put-openclawworkspacefiles)
   - [DELETE `/openclaw/workspace/files`](#delete-openclawworkspacefiles)
   - [GET `/openclaw/workspace/status`](#get-openclawworkspacestatus)
+  - [GET `/openclaw/subagents`](#get-openclawsubagents)
 - [Recommended OpenClaw integration flow (example)](#recommended-openclaw-integration-flow-example)
 
 ## Versioning
@@ -149,7 +152,7 @@ Core fields (always present unless noted):
 - `agent_tokens_output_cache` (integer | null) - Cached output tokens used (usage metric)
 - `agent_model` (string | null) - AI model name actually used (e.g., "claude-3-5-sonnet-20241022") (usage metric)
 - `agent_model_provider` (string | null) - AI model provider actually used (e.g., "anthropic", "openai") (usage metric)
-- `preferred_model` (string | null) - User's preferred AI model for execution (e.g., "gpt-4o", null = use system default)
+- `preferred_model` (string | null) - User's preferred AI model for execution (use `id` from `GET /models`; null = use system default)
 - `created_at` (timestamp)
 - `updated_at` (timestamp)
 
@@ -284,6 +287,8 @@ Response `200`:
 ```
 
 ## Models
+
+Use the models endpoint to discover which AI models can be used for task execution. When creating or updating a task, set `preferred_model` to a model's `id` from this list; use `null` to fall back to the system default.
 
 ### GET `/models`
 
@@ -421,7 +426,7 @@ Request body:
   "agent_tokens_output_cache": 200 (optional),
   "agent_model": "claude-3-5-sonnet-20241022 (optional)",
   "agent_model_provider": "anthropic (optional)",
-  "preferred_model": "gpt-4o (optional, null = use default)"
+  "preferred_model": "openrouter/anthropic/claude-sonnet-4.5 (optional, null = use system default)"
 }
 ```
 
@@ -460,7 +465,7 @@ Agent fields notes:
   - `agent_cost_usd` should be a decimal number (e.g., `0.0523`)
   - Token fields should be non-negative integers
   - Model and provider should be strings identifying the AI service actually used
-- **User preference** (`preferred_model`): This field stores the user's preferred AI model ID for task execution (e.g., `"gpt-4o"`, `"claude-3-5-sonnet-20241022"`). Use `null` to indicate system default. The provider is automatically determined from the model ID. Max 200 characters. Available models can be retrieved from `GET /api/v1/models`.
+- **User preference** (`preferred_model`): This field stores the user's preferred AI model ID for task execution. Use the `id` from `GET /api/v1/models` (e.g., `"openrouter/anthropic/claude-sonnet-4.5"`). Use `null` to indicate system default. Max 200 characters.
 
 Status transition side-effects:
 
@@ -1158,16 +1163,106 @@ Errors:
 - `401` authentication required
 - `503` OpenClaw service not configured or unavailable
 
+### GET `/openclaw/subagents`
+
+Get running, queued, and completed subagents from OpenClaw workspace runtime files (all authenticated users).
+
+This endpoint aggregates subagent status by reading runtime files from the OpenClaw workspace:
+
+- `runtime/mosbot/spawn-active.jsonl` - Currently running subagents
+- `runtime/mosbot/spawn-requests.json` - Queued spawn requests
+- `runtime/mosbot/results-cache.jsonl` - Completed subagents with outcomes
+- `runtime/mosbot/activity-log.jsonl` - Activity logs for timestamp enrichment
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "running": [
+      {
+        "sessionKey": "agent:main:cron:abc123",
+        "sessionLabel": "mosbot-task-550e8400-e29b-41d4-a716-446655440000",
+        "taskId": "550e8400-e29b-41d4-a716-446655440000",
+        "status": "RUNNING",
+        "model": "sonnet",
+        "startedAt": "2026-02-10T09:21:00Z",
+        "timeoutMinutes": 15
+      }
+    ],
+    "queued": [
+      {
+        "taskId": "650e8400-e29b-41d4-a716-446655440001",
+        "title": "Test display token usage",
+        "status": "SPAWN_QUEUED",
+        "model": "sonnet",
+        "queuedAt": "2026-02-10T05:33:58Z"
+      }
+    ],
+    "completed": [
+      {
+        "sessionLabel": "mosbot-task-750e8400-e29b-41d4-a716-446655440002",
+        "taskId": "750e8400-e29b-41d4-a716-446655440002",
+        "status": "COMPLETED",
+        "outcome": "✅ Task Complete: Successfully implemented feature",
+        "startedAt": "2026-02-09T09:43:58Z",
+        "completedAt": "2026-02-09T09:56:19Z",
+        "durationSeconds": 742
+      }
+    ],
+    "retention": {
+      "completedRetentionDays": 30,
+      "activityLogRetentionDays": 7,
+      "nextPurgeAt": "2026-02-11T03:00:00Z"
+    }
+  }
+}
+```
+
+Response fields:
+
+- `running[]` - Currently active subagents from `spawn-active.jsonl`
+- `queued[]` - Pending spawn requests with `status: "SPAWN_QUEUED"` from `spawn-requests.json`
+- `completed[]` - Finished subagents from `results-cache.jsonl`, deduplicated by `sessionLabel` (latest `cachedAt` wins)
+- `retention` - Data retention policy information
+
+**Data retention**: The API automatically purges old subagent data on a daily schedule (3 AM Asia/Singapore by default):
+
+- Completed subagents older than `completedRetentionDays` (default 30 days) are removed from `results-cache.jsonl`
+- Activity logs older than `activityLogRetentionDays` (default 7 days) are removed from `activity-log.jsonl`
+- If `RETENTION_ARCHIVE_ENABLED=true`, purged entries are archived to `/runtime/mosbot/archive/` before deletion
+
+**Configuration environment variables**:
+
+- `SUBAGENT_RETENTION_DAYS` - Days to retain completed subagents (default 30)
+- `ACTIVITY_LOG_RETENTION_DAYS` - Days to retain activity logs (default 7)
+- `RETENTION_ARCHIVE_ENABLED` - Archive purged entries before deletion (default true)
+- `ENABLE_SUBAGENT_RETENTION_PURGE` - Enable automatic retention purge (default true)
+- `SUBAGENT_RETENTION_CRON` - Cron schedule for purge job (default `0 3 * * *`)
+
+**Notes**:
+
+- Files are read from OpenClaw workspace via the workspace HTTP service
+- Missing files are treated gracefully (empty arrays returned, not errors)
+- Malformed JSON lines are ignored (the endpoint does not fail)
+- `startedAt` and `durationSeconds` for completed subagents are computed best-effort from `activity-log.jsonl` when available; otherwise may be null
+
+Errors:
+
+- `401` authentication required
+- `503` OpenClaw service not configured or unavailable
+
 **Retry behavior**: All OpenClaw workspace requests automatically retry up to 3 times with exponential backoff (500ms base delay) for transient errors (timeouts, connection failures, 503 errors).
 
 ## Recommended OpenClaw integration flow (example)
 
 1. **Login** with a dedicated Mosbot integration user (`POST /auth/login`).
 2. **Cache users** for assignee resolution (`GET /users?active_only=true`).
-3. **List tasks** for sync (`GET /tasks?include_archived=true&limit=100&offset=...`).
-4. **Create tasks** on demand (`POST /tasks`).
-5. **Update status/assignee/tags** (`PATCH /tasks/:id`).
-6. **Read history** when you need an audit trail (`GET /tasks/:id/history`).
+3. **Optionally cache AI models** for task model selection (`GET /models`). Use the returned `id` values when setting `preferred_model` on tasks.
+4. **List tasks** for sync (`GET /tasks?include_archived=true&limit=100&offset=...`).
+5. **Create tasks** on demand (`POST /tasks`). Set `preferred_model` to a model `id` from step 3, or omit/null for system default.
+6. **Update status/assignee/tags/preferred_model** (`PATCH /tasks/:id`).
+7. **Read history** when you need an audit trail (`GET /tasks/:id/history`).
 
 ## Quick Reference: All Endpoints
 
@@ -1180,6 +1275,10 @@ Errors:
 - `POST /api/v1/auth/login` - Login and get JWT
 - `GET /api/v1/auth/me` - Get current user
 - `POST /api/v1/auth/verify` - Verify JWT
+
+### AI Models (Authenticated)
+
+- `GET /api/v1/models` - List available AI models for task execution (use `id` for `preferred_model`)
 
 ### Tasks (Authenticated)
 
@@ -1226,3 +1325,4 @@ Errors:
 - `PUT /api/v1/openclaw/workspace/files` - Update file (admin/owner, fails if not exists)
 - `DELETE /api/v1/openclaw/workspace/files` - Delete file (admin/owner)
 - `GET /api/v1/openclaw/workspace/status` - Get sync status (all users)
+- `GET /api/v1/openclaw/subagents` - Get running/queued/completed subagents (all users)
