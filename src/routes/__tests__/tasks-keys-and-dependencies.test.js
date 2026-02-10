@@ -156,14 +156,6 @@ describe('Task Keys and Dependencies (Unit Tests)', () => {
     it('should return 400 for self-dependency', async () => {
       const token = getToken('user-id', 'user');
 
-      const mockClient = {
-        query: jest.fn(),
-        release: jest.fn()
-      };
-      pool.connect.mockResolvedValue(mockClient);
-
-      mockClient.query.mockResolvedValueOnce({}); // BEGIN
-
       const response = await request(app)
         .post('/api/v1/tasks/550e8400-e29b-41d4-a716-446655440000/dependencies')
         .set('Authorization', `Bearer ${token}`)
@@ -171,7 +163,6 @@ describe('Task Keys and Dependencies (Unit Tests)', () => {
 
       expect(response.status).toBe(400);
       expect(response.body.error.message).toBe('Task cannot depend on itself');
-      expect(mockClient.release).toHaveBeenCalled();
     });
 
     it('should return 404 if task does not exist', async () => {
@@ -395,9 +386,12 @@ describe('Task Keys and Dependencies (Unit Tests)', () => {
 
       mockClient.query
         .mockResolvedValueOnce({}) // BEGIN
-        .mockResolvedValueOnce({ rows: [{ id: 'task-id', status: 'TODO' }] }) // task exists
+        .mockResolvedValueOnce({ rows: [{ id: 'task-id', status: 'TODO' }] }) // fetch existing task
         .mockResolvedValueOnce({ rows: [incompleteDependency] }) // check blocking dependencies
-        .mockResolvedValueOnce({}); // ROLLBACK (implicit)
+        .mockResolvedValueOnce({}); // ROLLBACK
+
+      // pool.query is used to log the blocking event after rollback
+      pool.query.mockResolvedValueOnce({});
 
       const response = await request(app)
         .patch('/api/v1/tasks/550e8400-e29b-41d4-a716-446655440000')
@@ -421,12 +415,12 @@ describe('Task Keys and Dependencies (Unit Tests)', () => {
 
       mockClient.query
         .mockResolvedValueOnce({}) // BEGIN
-        .mockResolvedValueOnce({ rows: [{ id: 'task-id', status: 'TODO' }] }) // task exists
+        .mockResolvedValueOnce({ rows: [{ id: 'task-id', status: 'TODO' }] }) // fetch existing task
         .mockResolvedValueOnce({ rows: [] }) // check blocking dependencies (none incomplete)
-        .mockResolvedValueOnce({ rows: [{ id: 'task-id', status: 'IN PROGRESS' }] }) // update task
-        .mockResolvedValueOnce({ rows: [{ id: 'task-id', status: 'IN PROGRESS' }] }) // fetch updated task
-        .mockResolvedValueOnce({}) // log
-        .mockResolvedValueOnce({}); // COMMIT
+        .mockResolvedValueOnce({ rows: [{ id: 'task-id', status: 'IN PROGRESS' }] }) // UPDATE ... RETURNING *
+        .mockResolvedValueOnce({}) // logTaskEvent INSERT
+        .mockResolvedValueOnce({}) // COMMIT
+        .mockResolvedValueOnce({ rows: [{ id: 'task-id', status: 'IN PROGRESS' }] }); // fetch complete task with joins
 
       const response = await request(app)
         .patch('/api/v1/tasks/550e8400-e29b-41d4-a716-446655440000')

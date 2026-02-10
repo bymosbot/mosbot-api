@@ -1,0 +1,37 @@
+{
+  "models": {
+    "openrouter/moonshotai/kimi-k2.5": {
+      "alias": "Moonshot AI - Kimi K2.5",
+      "params": {
+        "contextWindow": 256000,
+        "maxTokens": 8000,
+        "reasoning": false
+      }
+    },
+    "openrouter/anthropic/claude-sonnet-4.5": {
+      "alias": "Anthropic - Claude Sonnet 4.5",
+      "params": {
+        "maxTokens": 8000
+      }
+    },
+    "openrouter/anthropic/claude-haiku-4.5": {
+      "alias": "Anthropic - Claude Haiku 4.5",
+      "params": {
+        "maxTokens": 8000
+      }
+    },
+    "openrouter/google/gemini-2.5-flash": {
+      "alias": "Google - Gemini 2.5 Flash",
+      "params": {
+        "maxTokens": 8000
+      }
+    },
+    "openrouter/deepseek/deepseek-chat": {
+      "alias": "DeepSeek - DeepSeek Chat",
+      "params": {
+        "maxTokens": 8000
+      }
+    }
+  },
+  "defaultModel": "openrouter/moonshotai/kimi-k2.5"
+}

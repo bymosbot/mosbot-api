@@ -142,13 +142,14 @@ Core fields (always present unless noted):
 - `archived_at` (timestamp | null)
 - `parent_task_id` (uuid | null) - For epic/subtask relationships
 - `parent_sort_order` (integer | null) - Sort order for subtasks under the same parent
-- `agent_cost_usd` (decimal | null) - AI agent cost in USD
-- `agent_tokens_input` (integer | null) - Input tokens used
-- `agent_tokens_input_cache` (integer | null) - Cached input tokens used
-- `agent_tokens_output` (integer | null) - Output tokens generated
-- `agent_tokens_output_cache` (integer | null) - Cached output tokens used
-- `agent_model` (string | null) - AI model name (e.g., "claude-3-sonnet")
-- `agent_model_provider` (string | null) - AI model provider (e.g., "anthropic", "openai")
+- `agent_cost_usd` (decimal | null) - AI agent cost in USD (usage metric)
+- `agent_tokens_input` (integer | null) - Input tokens used (usage metric)
+- `agent_tokens_input_cache` (integer | null) - Cached input tokens used (usage metric)
+- `agent_tokens_output` (integer | null) - Output tokens generated (usage metric)
+- `agent_tokens_output_cache` (integer | null) - Cached output tokens used (usage metric)
+- `agent_model` (string | null) - AI model name actually used (e.g., "claude-3-5-sonnet-20241022") (usage metric)
+- `agent_model_provider` (string | null) - AI model provider actually used (e.g., "anthropic", "openai") (usage metric)
+- `preferred_model` (string | null) - User's preferred AI model for execution (e.g., "gpt-4o", null = use system default)
 - `created_at` (timestamp)
 - `updated_at` (timestamp)
 
@@ -282,6 +283,49 @@ Response `200`:
 { "data": { "valid": true, "user": { "id": "uuid", "name": "...", "email": "...", "avatar_url": null, "role": "user", "active": true } } }
 ```
 
+## Models
+
+### GET `/models`
+
+List all available AI models that can be selected for task execution.
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "models": [
+      {
+        "id": "openrouter/anthropic/claude-sonnet-4.5",
+        "name": "Anthropic - Claude Sonnet 4.5",
+        "params": { "maxTokens": 8000 },
+        "provider": "anthropic"
+      },
+      {
+        "id": "openrouter/moonshotai/kimi-k2.5",
+        "name": "Moonshot AI - Kimi K2.5",
+        "params": { "contextWindow": 256000, "maxTokens": 8000, "reasoning": false },
+        "provider": "moonshotai"
+      }
+    ],
+    "defaultModel": "openrouter/moonshotai/kimi-k2.5"
+  }
+}
+```
+
+Each model object:
+
+- `id` — model identifier; use when setting `preferred_model` on a task
+- `name` — display name (from config alias)
+- `params` — optional model parameters (`contextWindow`, `maxTokens`, `reasoning`); shape varies by model
+- `provider` — extracted from model ID path (e.g. `anthropic` from `openrouter/anthropic/...`)
+
+Notes:
+
+- The `id` field is used when setting `preferred_model` on a task
+- The `provider` field is automatically determined from the model ID path
+- `defaultModel` indicates which model is used when `preferred_model` is `null`
+
 ## Task endpoints (OpenClaw adapter surface)
 
 ### GET `/tasks`
@@ -375,8 +419,9 @@ Request body:
   "agent_tokens_input_cache": 500 (optional),
   "agent_tokens_output": 800 (optional),
   "agent_tokens_output_cache": 200 (optional),
-  "agent_model": "claude-3-sonnet (optional)",
-  "agent_model_provider": "anthropic (optional)"
+  "agent_model": "claude-3-5-sonnet-20241022 (optional)",
+  "agent_model_provider": "anthropic (optional)",
+  "preferred_model": "gpt-4o (optional, null = use default)"
 }
 ```
 
@@ -407,14 +452,15 @@ You may send any subset of these fields:
 
 - `title`, `summary`, `status`, `priority`, `type`, `reporter_id`, `assignee_id`, `due_date`, `tags`, `parent_task_id`
 - `agent_cost_usd`, `agent_tokens_input`, `agent_tokens_input_cache`, `agent_tokens_output`, `agent_tokens_output_cache`, `agent_model`, `agent_model_provider`
+- `preferred_model`
 
-Agent usage fields notes:
+Agent fields notes:
 
-- These fields track AI model usage and cost per task
-- All agent fields are optional and can be set to `null`
-- `agent_cost_usd` should be a decimal number (e.g., `0.0523`)
-- Token fields should be non-negative integers
-- Model and provider should be strings identifying the AI service used
+- **Usage metrics** (`agent_cost_usd`, `agent_tokens_*`, `agent_model`, `agent_model_provider`): These fields track AI model usage and cost per task after execution. All are optional and can be set to `null`.
+  - `agent_cost_usd` should be a decimal number (e.g., `0.0523`)
+  - Token fields should be non-negative integers
+  - Model and provider should be strings identifying the AI service actually used
+- **User preference** (`preferred_model`): This field stores the user's preferred AI model ID for task execution (e.g., `"gpt-4o"`, `"claude-3-5-sonnet-20241022"`). Use `null` to indicate system default. The provider is automatically determined from the model ID. Max 200 characters. Available models can be retrieved from `GET /api/v1/models`.
 
 Status transition side-effects:
 

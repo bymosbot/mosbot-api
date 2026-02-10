@@ -66,7 +66,7 @@ async function logTaskEvent(client, taskId, eventType, source, actorId, oldValue
 function computeTaskDiff(oldTask, newTask) {
   const oldValues = {};
   const newValues = {};
-  const fieldsToCompare = ['title', 'summary', 'status', 'priority', 'type', 'reporter_id', 'assignee_id', 'due_date', 'done_at', 'archived_at', 'tags', 'parent_task_id'];
+  const fieldsToCompare = ['title', 'summary', 'status', 'priority', 'type', 'reporter_id', 'assignee_id', 'due_date', 'done_at', 'archived_at', 'tags', 'parent_task_id', 'preferred_model'];
   
   for (const field of fieldsToCompare) {
     const oldVal = oldTask[field];
@@ -254,7 +254,8 @@ router.post('/', optionalAuth, async (req, res, next) => {
       agent_tokens_output,
       agent_tokens_output_cache,
       agent_model,
-      agent_model_provider
+      agent_model_provider,
+      preferred_model
     } = req.body;
     
     // Validation
@@ -305,6 +306,16 @@ router.post('/', optionalAuth, async (req, res, next) => {
       }
     }
     
+    // Validate preferred_model field
+    if (preferred_model !== undefined && preferred_model !== null) {
+      if (typeof preferred_model !== 'string' || preferred_model.trim().length === 0) {
+        return res.status(400).json({ error: { message: 'preferred_model must be a non-empty string', status: 400 } });
+      }
+      if (preferred_model.length > 200) {
+        return res.status(400).json({ error: { message: 'preferred_model must be 200 characters or less', status: 400 } });
+      }
+    }
+    
     // Validate and normalize tags
     let normalizedTags = null;
     if (tags !== undefined && tags !== null) {
@@ -342,12 +353,13 @@ router.post('/', optionalAuth, async (req, res, next) => {
     const result = await client.query(`
       INSERT INTO tasks (title, summary, status, priority, type, reporter_id, assignee_id, due_date, tags, parent_task_id, 
         agent_cost_usd, agent_tokens_input, agent_tokens_input_cache, agent_tokens_output, agent_tokens_output_cache, 
-        agent_model, agent_model_provider)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+        agent_model, agent_model_provider, preferred_model)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
       RETURNING *
     `, [title, summary, status, priority, type, finalReporterId, assignee_id, due_date, normalizedTags, parent_task_id || null,
         agent_cost_usd ?? null, agent_tokens_input ?? null, agent_tokens_input_cache ?? null, 
-        agent_tokens_output ?? null, agent_tokens_output_cache ?? null, agent_model ?? null, agent_model_provider ?? null]);
+        agent_tokens_output ?? null, agent_tokens_output_cache ?? null, agent_model ?? null, agent_model_provider ?? null,
+        preferred_model ?? null]);
     
     const newTask = result.rows[0];
     
@@ -362,7 +374,8 @@ router.post('/', optionalAuth, async (req, res, next) => {
       assignee_id: newTask.assignee_id,
       due_date: newTask.due_date,
       tags: newTask.tags,
-      parent_task_id: newTask.parent_task_id
+      parent_task_id: newTask.parent_task_id,
+      preferred_model: newTask.preferred_model
     };
     
     await logTaskEvent(
@@ -425,14 +438,15 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
       agent_tokens_output,
       agent_tokens_output_cache,
       agent_model,
-      agent_model_provider
+      agent_model_provider,
+      preferred_model
     } = req.body;
     
     await client.query('BEGIN');
     
     // Fetch full existing task for diff computation
     const existing = await client.query(
-      'SELECT id, title, summary, status, priority, type, reporter_id, assignee_id, due_date, done_at, archived_at, tags, parent_task_id FROM tasks WHERE id = $1',
+      'SELECT id, title, summary, status, priority, type, reporter_id, assignee_id, due_date, done_at, archived_at, tags, parent_task_id, preferred_model FROM tasks WHERE id = $1',
       [id]
     );
     if (existing.rows.length === 0) {
@@ -495,6 +509,18 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
           await client.query('ROLLBACK');
           return res.status(400).json({ error: { message: `${field.name} must be a non-negative integer`, status: 400 } });
         }
+      }
+    }
+    
+    // Validate preferred_model field
+    if (preferred_model !== undefined && preferred_model !== null) {
+      if (typeof preferred_model !== 'string' || preferred_model.trim().length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: { message: 'preferred_model must be a non-empty string', status: 400 } });
+      }
+      if (preferred_model.length > 200) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: { message: 'preferred_model must be 200 characters or less', status: 400 } });
       }
     }
     
@@ -702,6 +728,12 @@ router.put('/:id', optionalAuth, validateUUID('id'), async (req, res, next) => {
     if (agent_model_provider !== undefined) {
       updates.push(`agent_model_provider = $${paramCount}`);
       params.push(agent_model_provider);
+      paramCount++;
+    }
+    
+    if (preferred_model !== undefined) {
+      updates.push(`preferred_model = $${paramCount}`);
+      params.push(preferred_model);
       paramCount++;
     }
     
@@ -1271,15 +1303,25 @@ router.get('/:id/dependencies', optionalAuth, validateUUID('id'), async (req, re
 
 // POST /api/v1/tasks/:id/dependencies - Add a dependency
 router.post('/:id/dependencies', optionalAuth, validateUUID('id'), async (req, res, next) => {
+  // Require authentication
+  if (!req.user) {
+    return res.status(401).json({ error: { message: 'Authorization required', status: 401 } });
+  }
+  
+  const { id } = req.params;
+  const { depends_on_task_id } = req.body;
+  
+  if (!depends_on_task_id) {
+    return res.status(400).json({ error: { message: 'depends_on_task_id is required', status: 400 } });
+  }
+  
+  // Prevent self-dependency (check before acquiring client)
+  if (id === depends_on_task_id) {
+    return res.status(400).json({ error: { message: 'Task cannot depend on itself', status: 400 } });
+  }
+  
   const client = await pool.connect();
   try {
-    const { id } = req.params;
-    const { depends_on_task_id } = req.body;
-    
-    if (!depends_on_task_id) {
-      return res.status(400).json({ error: { message: 'depends_on_task_id is required', status: 400 } });
-    }
-    
     await client.query('BEGIN');
     
     // Check if both tasks exist
@@ -1291,12 +1333,6 @@ router.post('/:id/dependencies', optionalAuth, validateUUID('id'), async (req, r
     if (taskCheck.rows.length !== 2) {
       await client.query('ROLLBACK');
       return res.status(404).json({ error: { message: 'One or both tasks not found', status: 404 } });
-    }
-    
-    // Prevent self-dependency
-    if (id === depends_on_task_id) {
-      await client.query('ROLLBACK');
-      return res.status(400).json({ error: { message: 'Task cannot depend on itself', status: 400 } });
     }
     
     // Check for circular dependencies
@@ -1350,6 +1386,11 @@ router.post('/:id/dependencies', optionalAuth, validateUUID('id'), async (req, r
 
 // DELETE /api/v1/tasks/:id/dependencies/:dependsOnId - Remove a dependency
 router.delete('/:id/dependencies/:dependsOnId', optionalAuth, validateUUID('id'), validateUUID('dependsOnId'), async (req, res, next) => {
+  // Require authentication
+  if (!req.user) {
+    return res.status(401).json({ error: { message: 'Authorization required', status: 401 } });
+  }
+  
   const client = await pool.connect();
   try {
     const { id, dependsOnId } = req.params;
