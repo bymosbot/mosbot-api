@@ -28,6 +28,7 @@ describe('GET /api/v1/openclaw/subagents', () => {
   let app;
   let originalFetch;
   let mockOpenClawUrl;
+  let pool;
 
   beforeAll(() => {
     // Create Express app with routes
@@ -43,6 +44,22 @@ describe('GET /api/v1/openclaw/subagents', () => {
           status: err.status || 500,
         },
       });
+    });
+    
+    // Mock database pool
+    pool = require('../../db/pool');
+    jest.spyOn(pool, 'query').mockImplementation(async (query, params) => {
+      // Mock task number lookup
+      if (query.includes('SELECT id, task_number FROM tasks')) {
+        const taskIds = params || [];
+        return {
+          rows: taskIds.map((id, idx) => ({
+            id,
+            task_number: 100 + idx
+          }))
+        };
+      }
+      return { rows: [] };
     });
     
     // Mock fetch globally
@@ -122,6 +139,7 @@ describe('GET /api/v1/openclaw/subagents', () => {
         sessionKey: 'agent:main:cron:abc',
         sessionLabel: 'mosbot-task-123',
         taskId: 'task-123',
+        taskNumber: 100,
         status: 'RUNNING',
         model: 'sonnet',
         startedAt: '2026-02-10T09:00:00Z',
@@ -131,6 +149,7 @@ describe('GET /api/v1/openclaw/subagents', () => {
       // Verify queued mapping
       expect(response.body.data.queued[0]).toMatchObject({
         taskId: 'task-456',
+        taskNumber: 101,
         title: 'Test task',
         status: 'SPAWN_QUEUED',
         model: 'sonnet',
@@ -141,6 +160,7 @@ describe('GET /api/v1/openclaw/subagents', () => {
       expect(response.body.data.completed[0]).toMatchObject({
         sessionLabel: 'mosbot-task-789',
         taskId: 'task-789',
+        taskNumber: 102,
         status: 'COMPLETED',
         outcome: '✅ Task Complete',
         startedAt: '2026-02-09T09:45:00Z',

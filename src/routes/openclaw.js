@@ -314,7 +314,7 @@ router.get('/subagents', requireAuth, async (req, res, next) => {
     ]);
     
     // Parse running subagents from spawn-active.jsonl
-    const running = parseJsonl(spawnActiveContent).map(entry => ({
+    const runningRaw = parseJsonl(spawnActiveContent).map(entry => ({
       sessionKey: entry.sessionKey || null,
       sessionLabel: entry.sessionLabel || null,
       taskId: entry.taskId || null,
@@ -325,11 +325,11 @@ router.get('/subagents', requireAuth, async (req, res, next) => {
     }));
     
     // Parse queued subagents from spawn-requests.json
-    let queued = [];
+    let queuedRaw = [];
     if (spawnRequestsContent) {
       try {
         const spawnRequests = JSON.parse(spawnRequestsContent);
-        queued = (spawnRequests.requests || [])
+        queuedRaw = (spawnRequests.requests || [])
           .filter(r => r.status === 'SPAWN_QUEUED')
           .map(r => ({
             taskId: r.taskId || null,
@@ -376,7 +376,7 @@ router.get('/subagents', requireAuth, async (req, res, next) => {
     });
     
     // Map completed entries with activity log enrichment
-    const completed = Array.from(completedMap.values()).map(entry => {
+    const completedRaw = Array.from(completedMap.values()).map(entry => {
       const sessionLabel = entry.sessionLabel;
       const taskId = entry.taskId || null;
       const completedAt = entry.cachedAt || entry.timestamp || null;
@@ -417,6 +417,43 @@ router.get('/subagents', requireAuth, async (req, res, next) => {
         durationSeconds
       };
     });
+    
+    // Collect all unique task IDs from running, queued, and completed
+    const allTaskIds = new Set();
+    runningRaw.forEach(r => r.taskId && allTaskIds.add(r.taskId));
+    queuedRaw.forEach(q => q.taskId && allTaskIds.add(q.taskId));
+    completedRaw.forEach(c => c.taskId && allTaskIds.add(c.taskId));
+    
+    // Fetch task numbers for all task IDs in one query
+    const taskNumberMap = new Map();
+    if (allTaskIds.size > 0) {
+      const pool = require('../db/pool');
+      const taskIdsArray = Array.from(allTaskIds);
+      const placeholders = taskIdsArray.map((_, i) => `$${i + 1}`).join(',');
+      const taskQuery = await pool.query(
+        `SELECT id, task_number FROM tasks WHERE id IN (${placeholders})`,
+        taskIdsArray
+      );
+      taskQuery.rows.forEach(row => {
+        taskNumberMap.set(row.id, row.task_number);
+      });
+    }
+    
+    // Enrich with task numbers
+    const running = runningRaw.map(r => ({
+      ...r,
+      taskNumber: r.taskId ? taskNumberMap.get(r.taskId) || null : null
+    }));
+    
+    const queued = queuedRaw.map(q => ({
+      ...q,
+      taskNumber: q.taskId ? taskNumberMap.get(q.taskId) || null : null
+    }));
+    
+    const completed = completedRaw.map(c => ({
+      ...c,
+      taskNumber: c.taskId ? taskNumberMap.get(c.taskId) || null : null
+    }));
     
     // Calculate retention metadata
     const completedRetentionDays = parseInt(process.env.SUBAGENT_RETENTION_DAYS, 10) || 30;

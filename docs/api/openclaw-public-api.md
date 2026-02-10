@@ -1184,6 +1184,7 @@ Response `200`:
         "sessionKey": "agent:main:cron:abc123",
         "sessionLabel": "mosbot-task-550e8400-e29b-41d4-a716-446655440000",
         "taskId": "550e8400-e29b-41d4-a716-446655440000",
+        "taskNumber": 1234,
         "status": "RUNNING",
         "model": "sonnet",
         "startedAt": "2026-02-10T09:21:00Z",
@@ -1193,6 +1194,7 @@ Response `200`:
     "queued": [
       {
         "taskId": "650e8400-e29b-41d4-a716-446655440001",
+        "taskNumber": 1235,
         "title": "Test display token usage",
         "status": "SPAWN_QUEUED",
         "model": "sonnet",
@@ -1203,6 +1205,7 @@ Response `200`:
       {
         "sessionLabel": "mosbot-task-750e8400-e29b-41d4-a716-446655440002",
         "taskId": "750e8400-e29b-41d4-a716-446655440002",
+        "taskNumber": 1236,
         "status": "COMPLETED",
         "outcome": "✅ Task Complete: Successfully implemented feature",
         "startedAt": "2026-02-09T09:43:58Z",
@@ -1222,8 +1225,11 @@ Response `200`:
 Response fields:
 
 - `running[]` - Currently active subagents from `spawn-active.jsonl`
+  - `taskNumber` - Human-readable task number (e.g., 1234 for TASK-1234), null if task not found
 - `queued[]` - Pending spawn requests with `status: "SPAWN_QUEUED"` from `spawn-requests.json`
+  - `taskNumber` - Human-readable task number (e.g., 1235 for TASK-1235), null if task not found
 - `completed[]` - Finished subagents from `results-cache.jsonl`, deduplicated by `sessionLabel` (latest `cachedAt` wins)
+  - `taskNumber` - Human-readable task number (e.g., 1236 for TASK-1236), null if task not found
 - `retention` - Data retention policy information
 
 **Data retention**: The API automatically purges old subagent data on a daily schedule (3 AM Asia/Singapore by default):
