@@ -349,7 +349,11 @@ router.get('/subagents', requireAuth, async (req, res, next) => {
     const activityBySession = new Map();
     
     activityEntries.forEach(entry => {
-      const key = entry.sessionLabel || entry.taskId;
+      // Activity log uses metadata.session_label and task_id (with underscore)
+      const sessionLabel = entry.metadata?.session_label || entry.sessionLabel;
+      const taskId = entry.task_id || entry.taskId;
+      const key = sessionLabel || taskId;
+      
       if (key) {
         if (!activityBySession.has(key)) {
           activityBySession.set(key, []);
@@ -386,7 +390,9 @@ router.get('/subagents', requireAuth, async (req, res, next) => {
       let durationSeconds = null;
       
       const activities = activityBySession.get(sessionLabel) || activityBySession.get(taskId) || [];
+      // Look for orchestration:spawn event which marks subagent start
       const startEvent = activities.find(a => 
+        a.category === 'orchestration:spawn' ||
         a.event === 'agent_start' || 
         a.event === 'subagent_start' ||
         (a.timestamp && !a.event)
@@ -401,8 +407,8 @@ router.get('/subagents', requireAuth, async (req, res, next) => {
             const start = new Date(startedAt).getTime();
             const end = new Date(completedAt).getTime();
             durationSeconds = Math.floor((end - start) / 1000);
-      } catch (_err) {
-        // Invalid date format, leave null
+          } catch (_err) {
+            // Invalid date format, leave null
           }
         }
       }

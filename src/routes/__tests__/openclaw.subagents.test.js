@@ -442,5 +442,43 @@ describe('GET /api/v1/openclaw/subagents', () => {
       expect(completed.durationSeconds).toBeNull();
       expect(completed.completedAt).toBe('2026-02-10T11:00:00Z');
     });
+
+    it('should parse OpenClaw orchestration:spawn events with metadata.session_label', async () => {
+      const token = getToken('user-id', 'user');
+      
+      global.fetch = jest.fn().mockImplementation(async (url) => {
+        if (url.includes('results-cache.jsonl')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              content: '{"sessionLabel":"mosbot-task-openclaw","taskId":"task-oc","cachedAt":"2026-02-10T12:30:00Z","outcome":"✅ Complete"}\n'
+            })
+          };
+        }
+        if (url.includes('activity-log.jsonl')) {
+          // New OpenClaw format with category and nested metadata
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              content: '{"timestamp":"2026-02-10T12:00:00Z","task_id":"task-oc","task_number":"34","category":"orchestration:spawn","title":"Subagent spawned","metadata":{"session_label":"mosbot-task-openclaw","model":"sonnet"}}\n'
+            })
+          };
+        }
+        return { ok: false, status: 404, text: async () => 'Not Found' };
+      });
+
+      const response = await request(app)
+        .get('/api/v1/openclaw/subagents')
+        .set('Authorization', `Bearer ${token}`);
+
+      expect(response.status).toBe(200);
+      const completed = response.body.data.completed[0];
+      expect(completed.sessionLabel).toBe('mosbot-task-openclaw');
+      expect(completed.startedAt).toBe('2026-02-10T12:00:00Z');
+      expect(completed.completedAt).toBe('2026-02-10T12:30:00Z');
+      expect(completed.durationSeconds).toBe(1800); // 30 minutes
+    });
   });
 });
