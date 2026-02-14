@@ -1451,4 +1451,208 @@ router.get('/:id/subtasks', optionalAuth, validateUUID('id'), async (req, res, n
   }
 });
 
+// GET /api/v1/tasks/:id/subagents - Get subagent execution attempts for a task
+router.get('/:id/subagents', require('../routes/auth').authenticateToken, validateUUID('id'), async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    
+    logger.info('Fetching subagents for task', { taskId: id, userId: req.user.id });
+    
+    // Check if task exists
+    const taskExists = await pool.query('SELECT id, task_number FROM tasks WHERE id = $1', [id]);
+    if (taskExists.rows.length === 0) {
+      return res.status(404).json({ error: { message: 'Task not found', status: 404 } });
+    }
+    
+    const taskNumber = taskExists.rows[0].task_number;
+    
+    // Import services
+    const { getAllSubagents } = require('../services/subagentsRuntimeService');
+    const { sessionsList, sessionsHistory } = require('../services/openclawGatewayClient');
+    
+    // Get runtime subagent entries for this task
+    const { running: runtimeRunning, queued: runtimeQueued, completed: runtimeCompleted } = await getAllSubagents({ taskId: id });
+    
+    // Build initial attempts map from runtime data
+    const attemptsMap = new Map();
+    
+    // Helper to add or merge attempt
+    const addAttempt = (key, data, source) => {
+      if (!attemptsMap.has(key)) {
+        attemptsMap.set(key, { ...data, _source: source });
+      } else {
+        // Merge, with runtime status taking precedence
+        const existing = attemptsMap.get(key);
+        attemptsMap.set(key, {
+          ...existing,
+          ...data,
+          // Runtime status wins
+          status: source === 'runtime' ? data.status : existing.status,
+          // Fill in missing fields
+          outcome: data.outcome || existing.outcome,
+          model: data.model || existing.model,
+          startedAt: data.startedAt || existing.startedAt,
+          completedAt: data.completedAt || existing.completedAt,
+          queuedAt: data.queuedAt || existing.queuedAt,
+          _source: source === 'runtime' ? source : existing._source
+        });
+      }
+    };
+    
+    // Add runtime entries (these are authoritative for status)
+    runtimeRunning.forEach(r => {
+      const key = r.sessionKey || r.sessionLabel || `running-${r.taskId}`;
+      addAttempt(key, {
+        taskId: r.taskId,
+        sessionKey: r.sessionKey,
+        sessionLabel: r.sessionLabel,
+        status: 'running',
+        model: r.model,
+        startedAt: r.startedAt,
+        completedAt: null,
+        queuedAt: null,
+        outcome: null,
+        tokensUsed: null
+      }, 'runtime');
+    });
+    
+    runtimeQueued.forEach(q => {
+      const key = q.sessionLabel || `queued-${q.taskId}`;
+      addAttempt(key, {
+        taskId: q.taskId,
+        sessionKey: null,
+        sessionLabel: q.sessionLabel || null,
+        status: 'queued',
+        model: q.model,
+        startedAt: null,
+        completedAt: null,
+        queuedAt: q.queuedAt,
+        outcome: null,
+        tokensUsed: null
+      }, 'runtime');
+    });
+    
+    runtimeCompleted.forEach(c => {
+      const key = c.sessionKey || c.sessionLabel || `completed-${c.taskId}`;
+      addAttempt(key, {
+        taskId: c.taskId,
+        sessionKey: c.sessionKey,
+        sessionLabel: c.sessionLabel,
+        status: 'completed',
+        model: null,
+        startedAt: c.startedAt,
+        completedAt: c.completedAt,
+        queuedAt: null,
+        outcome: c.outcome,
+        tokensUsed: null
+      }, 'runtime');
+    });
+    
+    // Try to enrich with gateway session data
+    try {
+      // Discover sessions within last 24 hours that match this task
+      const sessions = await sessionsList({
+        kinds: ['other'], // Subagents are typically categorized as 'other'
+        activeMinutes: 1440, // 24 hours
+        messageLimit: 0 // Don't fetch messages in list
+      });
+      
+      // Filter sessions by displayName/label matching mosbot-task-{taskId}-
+      const taskSessions = sessions.filter(s => {
+        const displayName = s.displayName || s.sessionLabel || '';
+        return displayName.startsWith(`mosbot-task-${id}-`) || 
+               displayName.startsWith(`mosbot-task-${taskNumber}-`);
+      });
+      
+      // Enrich attempts with gateway session data
+      for (const session of taskSessions) {
+        const key = session.key || session.sessionKey;
+        if (!key) continue;
+        
+        // Map session status to normalized status
+        let gatewayStatus = 'unknown';
+        if (session.abortedLastRun === true) {
+          gatewayStatus = 'failed';
+        } else if (session.kind === 'other' && session.updatedAt) {
+          // If we have a recent update and it's in gateway, assume running or completed
+          gatewayStatus = 'running'; // Will be overridden by runtime if present
+        }
+        
+        // Try to fetch history for outcome if not present
+        let outcome = null;
+        if (!attemptsMap.has(key) || !attemptsMap.get(key).outcome) {
+          try {
+            const history = await sessionsHistory({
+              sessionKey: key,
+              limit: 50,
+              includeTools: false
+            });
+            
+            // Find last assistant message as outcome
+            for (let i = history.length - 1; i >= 0; i--) {
+              const msg = history[i];
+              if (msg.role === 'assistant' && msg.content) {
+                const content = Array.isArray(msg.content) 
+                  ? msg.content.map(c => c.text || '').join('\n')
+                  : msg.content;
+                if (content.trim()) {
+                  outcome = content.trim();
+                  break;
+                }
+              }
+            }
+          } catch (histErr) {
+            logger.warn('Failed to fetch session history', { sessionKey: key, error: histErr.message });
+          }
+        }
+        
+        addAttempt(key, {
+          taskId: id,
+          sessionKey: key,
+          sessionLabel: session.displayName || session.sessionLabel,
+          status: gatewayStatus,
+          model: session.model,
+          startedAt: null, // Runtime provides more accurate startedAt
+          completedAt: null,
+          queuedAt: null,
+          outcome,
+          tokensUsed: session.totalTokens || null
+        }, 'gateway');
+      }
+    } catch (gatewayErr) {
+      // Gateway not available - gracefully degrade
+      logger.warn('OpenClaw gateway not available for session enrichment', { 
+        error: gatewayErr.message,
+        code: gatewayErr.code
+      });
+    }
+    
+    // Convert map to array and sort by newest first
+    const attempts = Array.from(attemptsMap.values())
+      .map(a => {
+        // Clean up internal fields
+        delete a._source;
+        return a;
+      })
+      .sort((a, b) => {
+        const aTime = new Date(a.startedAt || a.queuedAt || a.completedAt || 0).getTime();
+        const bTime = new Date(b.startedAt || b.queuedAt || b.completedAt || 0).getTime();
+        return bTime - aTime; // Newest first
+      });
+    
+    // Calculate meta counts
+    const meta = {
+      total: attempts.length,
+      running: attempts.filter(a => a.status === 'running').length,
+      completed: attempts.filter(a => a.status === 'completed').length,
+      failed: attempts.filter(a => a.status === 'failed').length,
+      queued: attempts.filter(a => a.status === 'queued').length
+    };
+    
+    res.json({ data: attempts, meta });
+  } catch (error) {
+    next(error);
+  }
+});
+
 module.exports = router;

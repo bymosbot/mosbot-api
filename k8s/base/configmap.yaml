@@ -13,6 +13,8 @@ data:
   ARCHIVE_ON_STARTUP: "false"  # Set to "true" to run archive job on startup
   # OpenClaw Workspace Integration
   OPENCLAW_WORKSPACE_URL: "http://openclaw-workspace.agents.svc.cluster.local:8080"
+  # OpenClaw Gateway Integration (for session tools)
+  OPENCLAW_GATEWAY_URL: "http://openclaw.agents.svc.cluster.local:18789"
   # Subagent Data Retention Configuration
   SUBAGENT_RETENTION_DAYS: "30"  # Days to retain completed subagents
   ACTIVITY_LOG_RETENTION_DAYS: "7"  # Days to retain activity logs
