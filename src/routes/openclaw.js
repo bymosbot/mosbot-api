@@ -272,6 +272,180 @@ function getNextPurgeTime() {
   return new Date(nextPurge.getTime() - (sgOffset * 60 * 1000)).toISOString();
 }
 
+// GET /api/v1/openclaw/agents
+// Get configured agents from OpenClaw config file (auto-discovery)
+router.get('/agents', requireAuth, async (req, res, next) => {
+  try {
+    logger.info('Fetching OpenClaw agents configuration', { userId: req.user.id });
+    
+    // Read the OpenClaw config file directly from the workspace service
+    // This reads from the running OpenClaw instance at /openclaw.json
+    // (copy of config in the workspace directory)
+    try {
+      const data = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+      const config = JSON.parse(data.content);
+      
+      // Extract agents list from config and filter out human-only entries
+      const agentsList = config?.agents?.list || [];
+      const filteredAgents = agentsList.filter(agent => !agent.orgChart?.isHuman);
+      
+      // Transform to include workspace path info and add default COO if empty
+      const agents = filteredAgents.length > 0 ? filteredAgents.map(agent => ({
+        id: agent.id,
+        name: agent.identity?.name || agent.name || agent.id,
+        label: agent.identity?.name || agent.name || agent.id,
+        description: agent.identity?.theme || `${agent.identity?.name || agent.id} workspace`,
+        icon: agent.identity?.emoji || '🤖',
+        workspace: agent.workspace,
+        isDefault: agent.default === true
+      })) : [
+        // Fallback default agent if none configured
+        {
+          id: 'coo',
+          name: 'COO',
+          label: 'Chief Operating Officer',
+          description: 'Operations and workflow management',
+          icon: '📊',
+          workspace: '/home/node/.openclaw/workspace-coo',
+          isDefault: true
+        }
+      ];
+      
+      // Sort so default agent comes first
+      agents.sort((a, b) => {
+        if (a.isDefault && !b.isDefault) return -1;
+        if (!a.isDefault && b.isDefault) return 1;
+        return 0;
+      });
+      
+      res.json({ data: agents });
+    } catch (readError) {
+      // If config file can't be read, return default COO agent
+      logger.warn('Could not read OpenClaw config from workspace service, using default agent', {
+        error: readError.message,
+        status: readError.status
+      });
+      
+      res.json({
+        data: [{
+          id: 'coo',
+          name: 'COO',
+          label: 'Chief Operating Officer',
+          description: 'Operations and workflow management',
+          icon: '📊',
+          workspace: '/home/node/.openclaw/workspace-coo',
+          isDefault: true
+        }]
+      });
+    }
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/v1/openclaw/org-chart
+// Get organization chart configuration from workspace
+router.get('/org-chart', requireAuth, async (req, res, next) => {
+  try {
+    logger.info('Fetching org chart configuration from OpenClaw config', { userId: req.user.id });
+    
+    try {
+      // Read openclaw.json instead of org-chart.json
+      const data = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+      const config = JSON.parse(data.content);
+      
+      // Basic validation
+      if (!config || typeof config !== 'object') {
+        return res.status(400).json({
+          error: {
+            message: 'Invalid OpenClaw config: must be a JSON object',
+            status: 400,
+            code: 'INVALID_CONFIG'
+          }
+        });
+      }
+      
+      // Transform agents.list into leadership array (for actual OpenClaw agents)
+      const agentsList = config?.agents?.list || [];
+      const agentLeadership = agentsList
+        .filter(agent => agent.orgChart) // Only include agents with orgChart data
+        .map(agent => ({
+          id: agent.id,
+          title: agent.orgChart.title,
+          label: agent.orgChart.label || `mosbot-${agent.id}`,
+          displayName: agent.identity?.name || agent.orgChart.title,
+          description: agent.orgChart.description,
+          status: 'scaffolded',
+          reportsTo: agent.orgChart.reportsTo
+        }));
+      
+      // Get human-only leadership entries from orgChart.leadership (e.g., CEO)
+      const humanLeadership = config?.orgChart?.leadership || [];
+      
+      // Merge both leadership sources
+      const leadership = [...humanLeadership, ...agentLeadership];
+      
+      // Get departments and subagents from orgChart section
+      const orgChartDepartments = config?.orgChart?.departments || [];
+      const orgChartSubagents = config?.orgChart?.subagents || [];
+      
+      // Create a lookup map for subagents
+      const subagentMap = {};
+      orgChartSubagents.forEach(subagent => {
+        subagentMap[subagent.id] = subagent;
+      });
+      
+      // Transform departments to include full subagent data
+      const departments = orgChartDepartments.map(dept => ({
+        id: dept.id,
+        name: dept.name,
+        leadId: dept.leadId,
+        description: dept.description,
+        subagents: (dept.subagents || []).map(subagentId => {
+          const subagent = subagentMap[subagentId];
+          return subagent || {
+            id: subagentId,
+            displayName: subagentId,
+            label: `mosbot-${subagentId}`,
+            description: '',
+            status: 'unknown'
+          };
+        })
+      }));
+      
+      // Return in the same format the dashboard expects
+      const validatedConfig = {
+        version: 1,
+        leadership,
+        departments
+      };
+      
+      res.json({ data: validatedConfig });
+    } catch (readError) {
+      // File not found or read error
+      if (readError.status === 404) {
+        return res.status(404).json({
+          error: {
+            message: 'OpenClaw configuration not found at /openclaw.json',
+            status: 404,
+            code: 'CONFIG_NOT_FOUND'
+          }
+        });
+      }
+      
+      // Other errors (invalid JSON, service error, etc.)
+      logger.warn('Failed to read OpenClaw config for org chart', {
+        error: readError.message,
+        status: readError.status
+      });
+      
+      throw readError;
+    }
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/v1/openclaw/subagents
 // Get running, queued, and completed subagents from OpenClaw workspace runtime files
 router.get('/subagents', requireAuth, async (req, res, next) => {

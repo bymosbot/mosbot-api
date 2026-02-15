@@ -26,6 +26,32 @@ COPY package*.json ./
 RUN npm ci && \
     npm cache clean --force
 
+# Development stage (for local development with hot reload)
+FROM base AS development
+
+# Set development environment
+ENV NODE_ENV=development
+
+WORKDIR /app
+
+# Copy all dependencies (including dev dependencies)
+COPY --from=dev-dependencies /app/node_modules ./node_modules
+
+# Copy application source
+COPY --chown=node:node . .
+
+# Switch to non-root user
+USER node
+
+# Expose port
+EXPOSE 3000
+
+# Use dumb-init to handle signals properly
+ENTRYPOINT ["dumb-init", "--"]
+
+# Start with nodemon for hot reload
+CMD ["npm", "run", "dev"]
+
 # Final production stage
 FROM base AS production
 
