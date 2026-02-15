@@ -27,6 +27,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     environment:
       NODE_ENV: development
       PORT: 3000
@@ -43,6 +45,19 @@ services:
       ARCHIVE_CRON: "0 3 * * *"
       ARCHIVE_AFTER_DAYS: "7"
       ARCHIVE_ON_STARTUP: "false"
+      # OpenClaw Integration
+      OPENCLAW_WORKSPACE_URL: ${OPENCLAW_WORKSPACE_URL:-}
+      OPENCLAW_WORKSPACE_TOKEN: ${OPENCLAW_WORKSPACE_TOKEN:-}
+      OPENCLAW_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-}
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-}
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      # Subagent Retention
+      SUBAGENT_RETENTION_DAYS: ${SUBAGENT_RETENTION_DAYS:-30}
+      ACTIVITY_LOG_RETENTION_DAYS: ${ACTIVITY_LOG_RETENTION_DAYS:-7}
+      RETENTION_ARCHIVE_ENABLED: ${RETENTION_ARCHIVE_ENABLED:-true}
+      ENABLE_SUBAGENT_RETENTION_PURGE: ${ENABLE_SUBAGENT_RETENTION_PURGE:-true}
+      SUBAGENT_RETENTION_CRON: ${SUBAGENT_RETENTION_CRON:-0 3 * * *}
+      SUBAGENT_RETENTION_ON_STARTUP: ${SUBAGENT_RETENTION_ON_STARTUP:-false}
     ports:
       - "3000:3000"
     volumes:

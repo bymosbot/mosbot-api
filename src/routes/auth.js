@@ -296,9 +296,9 @@ const authenticateToken = async (req, res, next) => {
   }
 };
 
-// Middleware to require admin role (or owner)
+// Middleware to require admin role (or owner or agent)
 const requireAdmin = (req, res, next) => {
-  if (!req.user || !['admin', 'owner'].includes(req.user.role)) {
+  if (!req.user || !['admin', 'agent', 'owner'].includes(req.user.role)) {
     return res.status(403).json({
       error: { message: 'Admin access required', status: 403 }
     });

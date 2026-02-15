@@ -103,23 +103,92 @@ Self-hosted task management API backend for MosBot - A personal productivity sys
 
    The OpenClaw workspace integration is disabled by default in local development. To enable it:
 
-   **Option A: Use port-forwarding** (recommended for testing)
+   **Quick Reference:**
+   
+   | Component | Host Machine URL | Docker Container URL |
+   |-----------|------------------|---------------------|
+   | Workspace Service | `http://localhost:8080` | `http://host.docker.internal:8080` |
+   | Gateway Service | `http://localhost:18789` | `http://host.docker.internal:18789` |
+   | Dashboard | `http://localhost:5173` | N/A (runs on host) |
+   | API | `http://localhost:3000` | N/A (runs in Docker) |
+
+   **Prerequisites:**
+   - OpenClaw deployed in Kubernetes
+   - `kubectl` configured with access to your cluster
+   - Two separate terminals for port-forwarding
+
+   **Step 1: Get OpenClaw Tokens**
 
    ```bash
-   # In a separate terminal, port-forward the OpenClaw workspace service
-   # Replace <openclaw-personal> with your OpenClaw namespace (e.g., agents, openclaw-personal)
+   # Get workspace service token
+   kubectl get secret -n openclaw-personal openclaw-secrets \
+     -o jsonpath='{.data.WORKSPACE_SERVICE_TOKEN}' | base64 -d && echo
+
+   # Get gateway token
+   kubectl get secret -n openclaw-personal openclaw-secrets \
+     -o jsonpath='{.data.OPENCLAW_GATEWAY_TOKEN}' | base64 -d && echo
+   ```
+
+   **Step 2: Start Port-Forwards** (keep these running in separate terminals)
+
+   ```bash
+   # Terminal 1: Workspace service (for file access and agent discovery)
    kubectl port-forward -n openclaw-personal svc/openclaw-workspace 8080:8080
+
+   # Terminal 2: Gateway service (for sessions and runtime data)
+   kubectl port-forward -n openclaw-personal svc/openclaw 18789:18789
    ```
 
-   Then in your `.env` file:
+   **Step 3: Configure Environment Variables**
+
+   Edit your `.env` file:
 
    ```bash
-   OPENCLAW_WORKSPACE_URL=http://localhost:8080
+   # OpenClaw Workspace Service (agent discovery and file access)
+   OPENCLAW_WORKSPACE_URL=http://host.docker.internal:8080
+   OPENCLAW_WORKSPACE_TOKEN=<workspace-token-from-step-1>
+
+   # OpenClaw Gateway (sessions and runtime data)
+   OPENCLAW_GATEWAY_URL=http://host.docker.internal:18789
+   OPENCLAW_GATEWAY_TOKEN=<gateway-token-from-step-1>
    ```
+
+   **Important:** Use `host.docker.internal` (not `localhost`) when running the API in Docker, as `localhost` inside a container refers to the container itself, not the host machine. The `host.docker.internal` hostname allows Docker containers to reach services running on the host.
+
+   **Step 4: Verify Connection**
+
+   ```bash
+   # Test workspace service (from host machine)
+   curl -H "Authorization: Bearer <workspace-token>" http://localhost:8080/status
+
+   # Test gateway service (from host machine)
+   curl -H "Authorization: Bearer <gateway-token>" \
+     -H "Content-Type: application/json" \
+     -d '{"tool":"sessions_list","action":"json","args":{},"sessionKey":"main"}' \
+     http://localhost:18789/tools/invoke
+   ```
+
+   **Troubleshooting:**
+
+   - **503 errors**: Port-forward may have stopped. Check terminals and restart if needed.
+   - **Connection refused**: Ensure port-forwards are running and using correct namespace.
+   - **401 unauthorized**: Verify tokens are correct and not expired.
+   - **Only seeing 1 agent (COO)**: API can't connect to workspace service. Check:
+     - Port-forward is running: `ps aux | grep "kubectl port-forward"`
+     - Using correct URL in `.env`: `host.docker.internal` for Docker, `localhost` for native
+     - Restart API after changing `.env`: `docker-compose restart api`
+   - **Seeing "main" agent**: Old cached data in browser. Clear and refresh:
+     ```javascript
+     // In browser DevTools console (F12)
+     localStorage.clear();
+     location.reload();
+     ```
+   - **Port-forward keeps dying**: This is normal when pods restart. Keep terminals open and restart when needed.
+   - **"fetch failed" errors**: Docker container can't reach host. Verify `extra_hosts` in `docker-compose.yml`.
 
    **Option B: Disable** (default)
 
-   Leave `OPENCLAW_WORKSPACE_URL` empty or unset in your `.env` file.
+   Leave `OPENCLAW_WORKSPACE_URL` and `OPENCLAW_GATEWAY_URL` empty or unset in your `.env` file.
 
 8. **Verify health**
 
@@ -140,6 +209,17 @@ docker build -t mosbot-api:latest .
 ```bash
 docker-compose up -d
 ```
+
+**Docker Networking for OpenClaw Integration:**
+
+The `docker-compose.yml` includes `extra_hosts` configuration to enable Docker containers to reach services running on the host machine:
+
+```yaml
+extra_hosts:
+  - "host.docker.internal:host-gateway"
+```
+
+This allows the API container to connect to OpenClaw services via `http://host.docker.internal:8080` when you're using `kubectl port-forward` on your host machine. Without this, the container's `localhost` would only refer to itself, not the host.
 
 ### Push to registry
 
@@ -360,6 +440,15 @@ curl http://localhost:3000/api/v1/tasks?assignee_id=<user-uuid>
 | `JWT_SECRET` | JWT signing secret | - |
 | `JWT_EXPIRES_IN` | JWT expiration time | `7d` |
 | `CORS_ORIGIN` | Allowed CORS origins | `*` |
+| `OPENCLAW_WORKSPACE_URL` | OpenClaw workspace service URL | - |
+| `OPENCLAW_WORKSPACE_TOKEN` | OpenClaw workspace auth token | - |
+| `OPENCLAW_GATEWAY_URL` | OpenClaw gateway service URL | - |
+| `OPENCLAW_GATEWAY_TOKEN` | OpenClaw gateway auth token | - |
+
+**OpenClaw Integration Notes:**
+- Use `http://host.docker.internal:8080` for Docker containers (not `localhost`)
+- Use `http://localhost:8080` for native Node.js (not in Docker)
+- Leave empty to disable OpenClaw integration (default in development)
 
 ## 🗄️ Database Schema
 

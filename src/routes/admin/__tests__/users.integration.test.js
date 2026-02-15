@@ -39,6 +39,7 @@ const ADMIN_ID = '00000000-0000-0000-0000-000000000002';
 const USER_ID = '00000000-0000-0000-0000-000000000003';
 
 const ownerUser = { id: OWNER_ID, name: 'Owner User', email: 'test-owner@example.com', role: 'owner', active: true };
+const _agentUser = { id: ADMIN_ID, name: 'Agent User', email: 'test-agent@example.com', role: 'agent', active: true };
 const adminUser = { id: ADMIN_ID, name: 'Admin User', email: 'test-admin@example.com', role: 'admin', active: true };
 const regularUser = { id: USER_ID, name: 'Regular User', email: 'test-user@example.com', role: 'user', active: true };
 

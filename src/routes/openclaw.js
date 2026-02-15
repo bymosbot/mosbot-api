@@ -75,8 +75,8 @@ router.get('/workspace/files', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/v1/openclaw/workspace/files/content
-// Read file content (admin/owner only)
-router.get('/workspace/files/content', requireAuth, requireAdmin, async (req, res, next) => {
+// Read file content (admin/owner for all paths, all authenticated users for /workspace/docs/**)
+router.get('/workspace/files/content', requireAuth, async (req, res, next) => {
   try {
     const { path: inputPath } = req.query;
     
@@ -88,9 +88,21 @@ router.get('/workspace/files/content', requireAuth, requireAdmin, async (req, re
 
     const workspacePath = normalizeAndValidateWorkspacePath(inputPath);
     
+    // Check if this is a docs path (accessible to all authenticated users)
+    const isDocsPath = workspacePath === '/workspace/docs' || workspacePath.startsWith('/workspace/docs/');
+    
+    // For non-docs paths, require admin/owner/agent role
+    if (!isDocsPath && !['admin', 'agent', 'owner'].includes(req.user?.role)) {
+      return res.status(403).json({
+        error: { message: 'Admin access required', status: 403 }
+      });
+    }
+    
     logger.info('Reading OpenClaw workspace file', { 
-      userId: req.user.id, 
-      path: workspacePath
+      userId: req.user.id,
+      userRole: req.user.role,
+      path: workspacePath,
+      isDocsPath
     });
     
     const data = await makeOpenClawRequest(
@@ -285,9 +297,9 @@ router.get('/agents', requireAuth, async (req, res, next) => {
       const data = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
       const config = JSON.parse(data.content);
       
-      // Extract agents list from config and filter out human-only entries
+      // Extract agents list from config
       const agentsList = config?.agents?.list || [];
-      const filteredAgents = agentsList.filter(agent => !agent.orgChart?.isHuman);
+      const filteredAgents = agentsList;
       
       // Transform to include workspace path info and add default COO if empty
       const agents = filteredAgents.length > 0 ? filteredAgents.map(agent => ({
@@ -347,47 +359,53 @@ router.get('/agents', requireAuth, async (req, res, next) => {
 // Get organization chart configuration from workspace
 router.get('/org-chart', requireAuth, async (req, res, next) => {
   try {
-    logger.info('Fetching org chart configuration from OpenClaw config', { userId: req.user.id });
+    logger.info('Fetching org chart configuration from workspace', { userId: req.user.id });
     
     try {
-      // Read openclaw.json instead of org-chart.json
-      const data = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
-      const config = JSON.parse(data.content);
+      // Read org-chart.json from workspace directory (separate from openclaw.json to avoid config validation issues)
+      // Located in workspace/ so it can be updated at runtime via the workspace service file API
+      const data = await makeOpenClawRequest('GET', '/files/content?path=/workspace/org-chart.json');
+      const orgChart = JSON.parse(data.content);
       
       // Basic validation
-      if (!config || typeof config !== 'object') {
+      if (!orgChart || typeof orgChart !== 'object') {
         return res.status(400).json({
           error: {
-            message: 'Invalid OpenClaw config: must be a JSON object',
+            message: 'Invalid org chart config: must be a JSON object',
             status: 400,
             code: 'INVALID_CONFIG'
           }
         });
       }
       
-      // Transform agents.list into leadership array (for actual OpenClaw agents)
-      const agentsList = config?.agents?.list || [];
-      const agentLeadership = agentsList
-        .filter(agent => agent.orgChart) // Only include agents with orgChart data
-        .map(agent => ({
-          id: agent.id,
-          title: agent.orgChart.title,
-          label: agent.orgChart.label || `mosbot-${agent.id}`,
-          displayName: agent.identity?.name || agent.orgChart.title,
-          description: agent.orgChart.description,
-          status: 'scaffolded',
-          reportsTo: agent.orgChart.reportsTo
-        }));
+      const leadership = orgChart.leadership || [];
+      const orgChartDepartments = orgChart.departments || [];
+      const orgChartSubagents = orgChart.subagents || [];
       
-      // Get human-only leadership entries from orgChart.leadership (e.g., CEO)
-      const humanLeadership = config?.orgChart?.leadership || [];
-      
-      // Merge both leadership sources
-      const leadership = [...humanLeadership, ...agentLeadership];
-      
-      // Get departments and subagents from orgChart section
-      const orgChartDepartments = config?.orgChart?.departments || [];
-      const orgChartSubagents = config?.orgChart?.subagents || [];
+      // Enrich leadership entries with active status from OpenClaw agents config
+      try {
+        const configData = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+        const config = JSON.parse(configData.content);
+        const agentsList = config?.agents?.list || [];
+        const activeAgentIds = new Set(agentsList.map(a => a.id));
+        
+        // Mark leadership entries as 'active' if they exist in OpenClaw's agents.list
+        leadership.forEach(entry => {
+          if (entry.status !== 'human' && activeAgentIds.has(entry.id)) {
+            entry.status = 'active';
+            // Enrich with model info from OpenClaw config
+            const agent = agentsList.find(a => a.id === entry.id);
+            if (agent) {
+              entry.model = agent.model?.primary || null;
+            }
+          }
+        });
+      } catch (configError) {
+        // If we can't read openclaw.json, still return org chart with original statuses
+        logger.warn('Could not read OpenClaw config for agent status enrichment', {
+          error: configError.message
+        });
+      }
       
       // Create a lookup map for subagents
       const subagentMap = {};
@@ -415,18 +433,91 @@ router.get('/org-chart', requireAuth, async (req, res, next) => {
       
       // Return in the same format the dashboard expects
       const validatedConfig = {
-        version: 1,
+        version: orgChart.version || 1,
         leadership,
         departments
       };
       
       res.json({ data: validatedConfig });
     } catch (readError) {
-      // File not found or read error
+      // If org-chart.json not found, fall back to extracting from openclaw.json
+      // This supports local dev and older configs that still embed orgChart in the main config
       if (readError.status === 404) {
+        logger.info('org-chart.json not found, falling back to openclaw.json extraction');
+        
+        // Helper to extract org chart from an openclaw.json config object
+        const extractOrgChart = (config) => {
+          const agentsList = config?.agents?.list || [];
+          const agentLeadership = agentsList
+            .filter(agent => agent.orgChart)
+            .map(agent => ({
+              id: agent.id,
+              title: agent.orgChart.title,
+              label: agent.orgChart.label || `mosbot-${agent.id}`,
+              displayName: agent.identity?.name || agent.orgChart.title,
+              description: agent.orgChart.description,
+              status: 'active',
+              reportsTo: agent.orgChart.reportsTo,
+              model: agent.model?.primary || null
+            }));
+          
+          const humanLeadership = config?.orgChart?.leadership || [];
+          const leadership = [...humanLeadership, ...agentLeadership];
+          
+          const orgChartDepartments = config?.orgChart?.departments || [];
+          const orgChartSubagents = config?.orgChart?.subagents || [];
+          
+          const subagentMap = {};
+          orgChartSubagents.forEach(subagent => {
+            subagentMap[subagent.id] = subagent;
+          });
+          
+          const departments = orgChartDepartments.map(dept => ({
+            id: dept.id,
+            name: dept.name,
+            leadId: dept.leadId,
+            description: dept.description,
+            subagents: (dept.subagents || []).map(subagentId => {
+              const subagent = subagentMap[subagentId];
+              return subagent || {
+                id: subagentId,
+                displayName: subagentId,
+                label: `mosbot-${subagentId}`,
+                description: '',
+                status: 'unknown'
+              };
+            })
+          }));
+          
+          return { leadership, departments };
+        };
+        
+        // Try multiple paths: workspace copy (may still have orgChart keys), then PVC root config
+        const configPaths = ['/workspace/openclaw.json', '/openclaw.json'];
+        
+        for (const configPath of configPaths) {
+          try {
+            const configData = await makeOpenClawRequest('GET', `/files/content?path=${configPath}`);
+            const config = JSON.parse(configData.content);
+            const { leadership, departments } = extractOrgChart(config);
+            
+            // Only use this source if it actually has org chart data
+            if (leadership.length > 0 || departments.length > 0) {
+              logger.info('Extracted org chart from fallback config', { source: configPath });
+              return res.json({
+                data: { version: 1, leadership, departments }
+              });
+            }
+          } catch (_err) {
+            // Try next path
+          }
+        }
+        
+        // All sources exhausted
+        logger.warn('Failed to read org chart from any source');
         return res.status(404).json({
           error: {
-            message: 'OpenClaw configuration not found at /openclaw.json',
+            message: 'Org chart configuration not found',
             status: 404,
             code: 'CONFIG_NOT_FOUND'
           }
@@ -434,7 +525,7 @@ router.get('/org-chart', requireAuth, async (req, res, next) => {
       }
       
       // Other errors (invalid JSON, service error, etc.)
-      logger.warn('Failed to read OpenClaw config for org chart', {
+      logger.warn('Failed to read org chart config', {
         error: readError.message,
         status: readError.status
       });
@@ -478,5 +569,403 @@ router.get('/subagents', requireAuth, async (req, res, next) => {
     next(error);
   }
 });
+
+// GET /api/v1/openclaw/sessions
+// Get active sessions from OpenClaw Gateway (running and queued)
+router.get('/sessions', requireAuth, async (req, res, next) => {
+  try {
+    logger.info('Fetching active sessions from OpenClaw Gateway', { userId: req.user.id });
+    
+    const { sessionsList } = require('../services/openclawGatewayClient');
+    
+    // Get list of agent IDs to query
+    // Try to read from OpenClaw config, fallback to common agent IDs
+    let agentIds = ['main', 'coo', 'cto', 'cmo', 'cpo'];
+    
+    try {
+      const data = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+      const config = JSON.parse(data.content);
+      const agentsList = config?.agents?.list || [];
+      const configuredAgents = agentsList
+        .map(agent => agent.id);
+      
+      if (configuredAgents.length > 0) {
+        agentIds = ['main', ...configuredAgents];
+      }
+    } catch (configError) {
+      logger.warn('Could not read agent config, using default agent list', {
+        error: configError.message
+      });
+    }
+    
+    // Query sessions from each agent using the full agent session key format
+    // The sessionKey in /tools/invoke must be the full key (e.g., "agent:coo:main")
+    // to run the tool in that agent's context and see that agent's session store
+    const sessionPromises = agentIds.map(agentId => {
+      // Use the full session key format: "agent:<agentId>:main" for non-main agents
+      // For the "main" agent, just use "main" (the default)
+      const sessionKey = agentId === 'main' ? 'main' : `agent:${agentId}:main`;
+      
+      return sessionsList({
+        sessionKey,
+        limit: 500,
+        messageLimit: 1 // Include last message per session
+      }).then(sessions => sessions)
+      .catch(err => {
+        logger.warn('Failed to fetch sessions for agent', { agentId, sessionKey, error: err.message });
+        return [];
+      });
+    });
+    
+    const sessionArrays = await Promise.all(sessionPromises);
+    const allSessions = sessionArrays.flat();
+    
+    // Deduplicate by sessionId (agents may share some sessions)
+    const sessionMap = new Map();
+    allSessions.forEach(session => {
+      const sessionId = session.sessionId || session.id;
+      if (sessionId && !sessionMap.has(sessionId)) {
+        sessionMap.set(sessionId, session);
+      }
+    });
+    const sessions = Array.from(sessionMap.values());
+    
+    logger.info('Sessions received from OpenClaw Gateway', { 
+      userId: req.user.id,
+      sessionCount: sessions.length
+    });
+    
+    // Status thresholds based on updatedAt
+    // OpenClaw does not expose a real-time "busy/processing" flag via sessions_list.
+    // We infer status from how recently the session was updated:
+    //   running: updated within the last 2 minutes (likely actively processing)
+    //   active:  updated within the last 30 minutes (recently used)
+    //   idle:    updated more than 30 minutes ago
+    const RUNNING_THRESHOLD_MS = 2 * 60 * 1000;  // 2 minutes
+    const ACTIVE_THRESHOLD_MS = 30 * 60 * 1000;   // 30 minutes
+    const now = Date.now();
+    
+    // Transform sessions to match dashboard expectations
+    const transformedSessions = sessions.map(session => {
+      // Extract agent name from session key (e.g., "agent:main:cron:..." -> "main")
+      let agentName = 'unknown';
+      if (session.key) {
+        const keyParts = session.key.split(':');
+        if (keyParts.length >= 2 && keyParts[0] === 'agent') {
+          agentName = keyParts[1];
+        }
+      }
+      
+      // Determine status based on updatedAt timestamp
+      const updatedAtMs = session.updatedAt || 0;
+      const timeSinceUpdate = now - updatedAtMs;
+      let status;
+      if (timeSinceUpdate <= RUNNING_THRESHOLD_MS) {
+        status = 'running';  // Very recently updated - likely processing
+      } else if (timeSinceUpdate <= ACTIVE_THRESHOLD_MS) {
+        status = 'active';   // Recently used but not currently processing
+      } else {
+        status = 'idle';     // Not recently active
+      }
+      
+      // Extract the actual model used from the last message (not the session default)
+      // session.model is the session default (often claude-opus-4-6)
+      // messages[0].model or messages[0].provider/model has the actual model used
+      const lastMessage = session.messages?.[0] || null;
+      let actualModel = null;
+      if (lastMessage?.provider && lastMessage?.model) {
+        actualModel = `${lastMessage.provider}/${lastMessage.model}`;
+      } else if (lastMessage?.model) {
+        // Message model is in format "moonshotai/kimi-k2.5" (provider/model from API)
+        actualModel = lastMessage.model;
+      }
+      // Only use actual model from message; do not fall back to session default
+      const model = actualModel || null;
+      
+      // Extract token usage from last message
+      const usage = lastMessage?.usage || {};
+      const inputTokens = (usage.input || 0) + (usage.cacheRead || 0);
+      const outputTokens = usage.output || 0;
+      const messageCost = usage.cost?.total || 0;
+      
+      // Context window usage
+      const contextTokens = session.contextTokens || 0; // Total context window size
+      const totalTokensUsed = session.totalTokens || 0; // Tokens currently in context
+      const contextUsagePercent = contextTokens > 0 
+        ? Math.round((totalTokensUsed / contextTokens) * 100 * 10) / 10 
+        : 0;
+      
+      // Extract last message text content (truncated)
+      let lastMessageText = null;
+      if (lastMessage?.content) {
+        if (typeof lastMessage.content === 'string') {
+          lastMessageText = lastMessage.content;
+        } else if (Array.isArray(lastMessage.content)) {
+          // Find the text block (skip thinking blocks)
+          const textBlock = lastMessage.content.find(c => c.type === 'text');
+          lastMessageText = textBlock?.text || null;
+        }
+      }
+      // Truncate to 200 chars
+      if (lastMessageText && lastMessageText.length > 200) {
+        lastMessageText = lastMessageText.substring(0, 200) + '...';
+      }
+      
+      return {
+        id: session.sessionId || session.id,
+        key: session.key || null,
+        label: session.displayName || session.sessionLabel || session.sessionId || session.id,
+        status,
+        kind: session.kind || 'main',
+        updatedAt: session.updatedAt || null,
+        agent: agentName,
+        model,
+        // Token usage
+        contextTokens,
+        totalTokensUsed,
+        contextUsagePercent,
+        inputTokens,
+        outputTokens,
+        messageCost,
+        // Last message
+        lastMessage: lastMessageText,
+        lastMessageRole: lastMessage?.role || null,
+      };
+    });
+    
+    // Sort by updatedAt descending (most recent first)
+    transformedSessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    
+    logger.info('Returning sessions', { 
+      userId: req.user.id,
+      total: transformedSessions.length,
+      running: transformedSessions.filter(s => s.status === 'running').length,
+      active: transformedSessions.filter(s => s.status === 'active').length,
+      idle: transformedSessions.filter(s => s.status === 'idle').length
+    });
+    
+    res.json({
+      data: transformedSessions
+    });
+  } catch (error) {
+    // If OpenClaw Gateway is not configured, return empty array
+    if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
+      logger.warn('OpenClaw Gateway not available for sessions, returning empty array', {
+        userId: req.user.id
+      });
+      return res.json({ data: [] });
+    }
+    next(error);
+  }
+});
+
+// GET /api/v1/openclaw/cron-jobs
+// Get all scheduled/recurring jobs: gateway cron jobs + agent heartbeats from config
+router.get('/cron-jobs', requireAuth, async (req, res, next) => {
+  try {
+    logger.info('Fetching cron jobs from OpenClaw', { userId: req.user.id });
+
+    // Fetch gateway cron jobs and config heartbeats in parallel
+    const { cronList } = require('../services/openclawGatewayClient');
+
+    const [gatewayJobs, heartbeatJobs] = await Promise.all([
+      // 1. Gateway scheduler jobs (orchestration, memory flush, etc.)
+      cronList().catch(err => {
+        if (err.code === 'SERVICE_NOT_CONFIGURED' || err.code === 'SERVICE_UNAVAILABLE') {
+          return [];
+        }
+        logger.warn('Failed to fetch gateway cron jobs', { error: err.message });
+        return [];
+      }),
+
+      // 2. Heartbeat configs from openclaw.json + runtime last-run data
+      (async () => {
+        try {
+          const data = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+          const config = JSON.parse(data.content);
+          const agentsList = config?.agents?.list || [];
+          const agentsWithHeartbeat = agentsList.filter(agent => agent.heartbeat);
+
+          // Read last heartbeat timestamps in parallel for each agent
+          const heartbeatResults = await Promise.all(
+            agentsWithHeartbeat.map(async (agent) => {
+              const hb = agent.heartbeat;
+              const intervalMs = parseInterval(hb.every);
+
+              // Try to read the agent's last heartbeat file
+              let lastRunAt = null;
+              let nextRunAt = null;
+              try {
+                const workspaceBase = agent.workspace || `/home/node/.openclaw/workspace-${agent.id}`;
+                // The workspace service mounts the state PVC at /workspace,
+                // so agent workspace paths like /home/node/.openclaw/workspace-coo
+                // are accessible at /workspace-coo relative to the workspace service root
+                const relativePath = workspaceBase.replace(/^\/home\/node\/\.openclaw\//, '/');
+                const hbData = await makeOpenClawRequest(
+                  'GET',
+                  `/files/content?path=${encodeURIComponent(`${relativePath}/runtime/heartbeat/last.json`)}`
+                );
+                if (hbData?.content) {
+                  const parsed = JSON.parse(hbData.content);
+                  if (parsed.lastHeartbeat) {
+                    lastRunAt = parsed.lastHeartbeat;
+                    if (intervalMs) {
+                      nextRunAt = new Date(new Date(lastRunAt).getTime() + intervalMs).toISOString();
+                    }
+                  }
+                }
+              } catch (_hbReadError) {
+                // Heartbeat file may not exist yet — that's fine
+              }
+
+              return {
+                jobId: `heartbeat-${agent.id}`,
+                name: `${agent.identity?.name || agent.id} Heartbeat`,
+                description: `Periodic heartbeat for the ${agent.identity?.name || agent.id} agent.`,
+                source: 'config',
+                enabled: true,
+                agentId: agent.id,
+                agentEmoji: agent.identity?.emoji || null,
+                sessionTarget: hb.session || 'main',
+                schedule: {
+                  kind: 'every',
+                  everyMs: intervalMs,
+                  label: hb.every,
+                },
+                payload: {
+                  kind: 'heartbeat',
+                  model: hb.model || null,
+                },
+                delivery: {
+                  mode: hb.target === 'last' ? 'announce (last)' : (hb.target || 'none'),
+                },
+                lastRunAt,
+                nextRunAt,
+              };
+            })
+          );
+
+          return heartbeatResults;
+        } catch (readError) {
+          logger.warn('Could not read OpenClaw config for heartbeats', {
+            error: readError.message,
+          });
+          return [];
+        }
+      })(),
+    ]);
+
+    // Normalize gateway jobs: map common OpenClaw field names to our schema
+    // and compute nextRunAt from cron expressions / intervals when missing
+    let cronParser = null;
+    try { cronParser = require('cron-parser'); } catch (_) { /* optional dependency */ }
+
+    if (gatewayJobs.length > 0) {
+      logger.info('Raw gateway job sample (first job keys)', {
+        keys: Object.keys(gatewayJobs[0]),
+        sample: JSON.stringify(gatewayJobs[0]).slice(0, 500),
+      });
+    }
+    const taggedGatewayJobs = gatewayJobs.map(job => {
+      const normalized = {
+        ...job,
+        source: job.source || 'gateway',
+      };
+
+      // Normalize schedule object if missing but raw cron/expression/interval exists
+      if (!normalized.schedule) {
+        if (job.cron) {
+          normalized.schedule = { kind: 'cron', expr: job.cron, tz: job.tz || job.timezone || null };
+        } else if (job.expression) {
+          normalized.schedule = { kind: 'cron', expr: job.expression, tz: job.tz || job.timezone || null };
+        } else if (job.interval || job.every) {
+          const intervalStr = job.interval || job.every;
+          const intervalMs = parseInterval(intervalStr);
+          normalized.schedule = { kind: 'every', everyMs: intervalMs, label: intervalStr };
+        }
+      }
+
+      // Normalize lastRunAt — check state object (OpenClaw gateway format) first,
+      // then common top-level field names
+      if (!normalized.lastRunAt) {
+        const state = job.state || {};
+        if (state.lastRunAtMs) {
+          normalized.lastRunAt = new Date(state.lastRunAtMs).toISOString();
+        } else {
+          normalized.lastRunAt = job.lastFiredAt || job.lastRanAt || job.lastRun || job.last_fired_at || null;
+        }
+      }
+
+      // Normalize nextRunAt — check state object first, then common top-level field names
+      if (!normalized.nextRunAt) {
+        const state = job.state || {};
+        if (state.nextRunAtMs) {
+          normalized.nextRunAt = new Date(state.nextRunAtMs).toISOString();
+        } else {
+          normalized.nextRunAt = job.nextFireAt || job.nextRun || job.next_fire_at || null;
+        }
+      }
+
+      // Compute nextRunAt from schedule if still missing
+      if (!normalized.nextRunAt) {
+        try {
+          const sched = normalized.schedule || {};
+          if (sched.kind === 'cron' && sched.expr && cronParser) {
+            const options = {};
+            if (sched.tz) options.tz = sched.tz;
+            const interval = cronParser.parseExpression(sched.expr, options);
+            normalized.nextRunAt = interval.next().toISOString();
+          } else if (sched.kind === 'every' && sched.everyMs && normalized.lastRunAt) {
+            normalized.nextRunAt = new Date(
+              new Date(normalized.lastRunAt).getTime() + sched.everyMs
+            ).toISOString();
+          }
+        } catch (cronErr) {
+          logger.warn('Could not compute nextRunAt for gateway job', {
+            jobId: job.jobId || job.id || job.name,
+            error: cronErr.message,
+          });
+        }
+      }
+
+      // Also normalize status from state object for badge display
+      if (!normalized.status && job.state?.lastStatus) {
+        normalized.status = job.state.lastStatus;
+      }
+
+      return normalized;
+    });
+
+    const allJobs = [...taggedGatewayJobs, ...heartbeatJobs];
+
+    logger.info('Cron jobs aggregated', {
+      userId: req.user.id,
+      gateway: taggedGatewayJobs.length,
+      heartbeats: heartbeatJobs.length,
+      total: allJobs.length,
+    });
+
+    res.json({ data: allJobs });
+  } catch (error) {
+    if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
+      logger.warn('OpenClaw not available for cron jobs, returning empty array', {
+        userId: req.user.id,
+      });
+      return res.json({ data: [] });
+    }
+    next(error);
+  }
+});
+
+// Helper: parse human interval strings like "30m", "60m", "2h" to milliseconds
+function parseInterval(str) {
+  if (!str) return null;
+  const match = str.match(/^(\d+)\s*(s|m|h|d)$/i);
+  if (!match) return null;
+  const value = parseInt(match[1], 10);
+  const unit = match[2].toLowerCase();
+  const multipliers = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
+  return value * (multipliers[unit] || 60000);
+}
 
 module.exports = router;

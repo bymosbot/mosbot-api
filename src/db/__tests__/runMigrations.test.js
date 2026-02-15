@@ -38,8 +38,8 @@ describe('Migration Runner', () => {
     
     pool.connect.mockResolvedValue(mockClient);
     
-    // Mock fs.existsSync and readdirSync
-    fs.existsSync.mockReturnValue(true);
+    // Mock fs.existsSync: true for migrations dir, false for post-migration hooks (avoid loading bcrypt in tests)
+    fs.existsSync.mockImplementation((path) => !String(path).includes('.post.js'));
     fs.readdirSync.mockReturnValue(['000_bootstrap.sql', '001_initial_schema.sql']);
     fs.readFileSync.mockImplementation((filePath) => {
       if (filePath.includes('000_bootstrap.sql')) {

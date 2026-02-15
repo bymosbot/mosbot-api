@@ -60,6 +60,13 @@ END;
 $$ LANGUAGE plpgsql IMMUTABLE;
 
 -- ============================================================================
+-- SEQUENCES
+-- ============================================================================
+
+-- Sequence for task numbers (TASK-1, TASK-2, etc.)
+CREATE SEQUENCE IF NOT EXISTS task_number_seq START 1;
+
+-- ============================================================================
 -- TABLES
 -- ============================================================================
 
@@ -75,7 +82,7 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT valid_role CHECK (
-        role IN ('owner', 'admin', 'user')
+        role IN ('owner', 'agent', 'admin', 'user')
     ),
     CONSTRAINT check_email_format CHECK (
         email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
@@ -83,9 +90,10 @@ CREATE TABLE IF NOT EXISTS users (
     CONSTRAINT check_name_not_empty CHECK (trim(name) != '')
 );
 
--- Tasks table
+-- Tasks table (consolidated with all features)
 CREATE TABLE IF NOT EXISTS tasks (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  task_number BIGINT NOT NULL UNIQUE DEFAULT nextval('task_number_seq'),
   title VARCHAR(500) NOT NULL,
   summary TEXT,
   status VARCHAR(50) NOT NULL DEFAULT 'PLANNING',
@@ -97,6 +105,16 @@ CREATE TABLE IF NOT EXISTS tasks (
   due_date TIMESTAMP,
   done_at TIMESTAMP,
   archived_at TIMESTAMP,
+  parent_task_id UUID REFERENCES tasks(id) ON DELETE SET NULL,
+  parent_sort_order INTEGER,
+  agent_cost_usd NUMERIC(12,6),
+  agent_tokens_input INTEGER,
+  agent_tokens_input_cache INTEGER,
+  agent_tokens_output INTEGER,
+  agent_tokens_output_cache INTEGER,
+  agent_model TEXT,
+  agent_model_provider TEXT,
+  preferred_model TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
@@ -120,9 +138,11 @@ CONSTRAINT valid_type CHECK (
         'bug',
         'feature',
         'improvement',
-        'research'
+        'research',
+        'epic'
     )
 ),
+CONSTRAINT check_not_self_parent CHECK (id <> parent_task_id OR parent_task_id IS NULL),
 
 -- Tags validation constraints
 CONSTRAINT check_tags_array_length CHECK (
@@ -207,12 +227,36 @@ CREATE TABLE IF NOT EXISTS task_logs (
             'ARCHIVED_AUTO',
             'ARCHIVED_MANUAL',
             'RESTORED',
-            'DELETED'
+            'DELETED',
+            'COMMENT_CREATED',
+            'COMMENT_UPDATED',
+            'COMMENT_DELETED'
         )
     ),
     CONSTRAINT valid_source CHECK (
         source IN ('ui', 'api', 'cron', 'system')
     )
+);
+
+-- Task comments table
+CREATE TABLE IF NOT EXISTS task_comments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid (),
+    task_id UUID NOT NULL REFERENCES tasks (id) ON DELETE CASCADE,
+    author_id UUID REFERENCES users (id) ON DELETE SET NULL,
+    body TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT check_body_not_empty CHECK (trim(body) != ''),
+    CONSTRAINT check_body_length CHECK (char_length(body) <= 5000)
+);
+
+-- Task dependencies table (for blocking relationships)
+CREATE TABLE IF NOT EXISTS task_dependencies (
+    task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    depends_on_task_id UUID NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (task_id, depends_on_task_id),
+    CONSTRAINT check_not_self_dependency CHECK (task_id <> depends_on_task_id)
 );
 
 -- ============================================================================
@@ -242,6 +286,16 @@ CREATE INDEX IF NOT EXISTS idx_tasks_created ON tasks (created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_done_at ON tasks (done_at);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_status_done_at ON tasks (status, done_at);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_parent_task_id ON tasks(parent_task_id);
+
+CREATE INDEX IF NOT EXISTS idx_task_comments_task_created ON task_comments (task_id, created_at ASC);
+
+CREATE INDEX IF NOT EXISTS idx_task_comments_author_id ON task_comments (author_id);
+
+CREATE INDEX IF NOT EXISTS idx_task_dependencies_task_id ON task_dependencies(task_id);
+
+CREATE INDEX IF NOT EXISTS idx_task_dependencies_depends_on ON task_dependencies(depends_on_task_id);
 
 CREATE INDEX IF NOT EXISTS idx_tasks_tags ON tasks USING GIN (tags);
 
@@ -281,13 +335,61 @@ CREATE TRIGGER update_tasks_updated_at
   FOR EACH ROW
   EXECUTE FUNCTION update_updated_at();
 
+DROP TRIGGER IF EXISTS update_task_comments_updated_at ON task_comments;
+
+CREATE TRIGGER update_task_comments_updated_at
+  BEFORE UPDATE ON task_comments
+  FOR EACH ROW
+  EXECUTE FUNCTION update_updated_at();
+
+-- Function to detect circular dependencies (prevents A->B->C->A cycles)
+CREATE OR REPLACE FUNCTION check_circular_dependency(p_task_id UUID, p_depends_on_id UUID)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_has_circular BOOLEAN;
+    v_max_depth INTEGER := 100;
+BEGIN
+    WITH RECURSIVE dependency_chain AS (
+        SELECT 
+            p_depends_on_id as current_task_id,
+            1 as depth,
+            ARRAY[p_depends_on_id]::UUID[] as path
+        WHERE p_depends_on_id IS NOT NULL
+        
+        UNION ALL
+        
+        SELECT 
+            td.depends_on_task_id,
+            dc.depth + 1,
+            dc.path || td.depends_on_task_id
+        FROM dependency_chain dc
+        JOIN task_dependencies td ON td.task_id = dc.current_task_id
+        WHERE 
+            NOT (td.depends_on_task_id = ANY(dc.path))
+            AND dc.depth < v_max_depth
+            AND td.depends_on_task_id IS NOT NULL
+    )
+    SELECT EXISTS (
+        SELECT 1 
+        FROM dependency_chain 
+        WHERE current_task_id = p_task_id
+    ) INTO v_has_circular;
+    
+    RETURN COALESCE(v_has_circular, FALSE);
+END;
+$$ LANGUAGE plpgsql;
+
 -- ============================================================================
 -- SEED DATA
 -- ============================================================================
 
--- Seed default owner user (idempotent)
--- Default credentials: owner@mosbot.local / admin123
--- IMPORTANT: Change password after first login!
+-- Seed organization users based on org chart
+-- CEO password: admin123 (for owner access)
+-- Agent passwords: Auto-generated secure random strings (logged to console during migration)
+-- IMPORTANT: Change CEO password after first login!
+
+-- CEO (Owner/Human)
+-- Password: admin123 (fixed for easy owner access)
 INSERT INTO
     users (
         name,
@@ -298,22 +400,43 @@ INSERT INTO
         active
     )
 VALUES (
-        'Owner',
-        'owner@mosbot.local',
+        'Marcelo Oliveira',
+        'ceo@mosbot.local',
         '$2b$10$ZnnKYOAALphdWkfm39Bao.fiCpXswsfcOjPqiUNwmfcrEGGiC5hrW',
         'owner',
         null,
         true
     ) ON CONFLICT (email) DO NOTHING;
 
--- Idempotent owner promotion for existing installations
--- If no owner exists but admin@mosbot.local exists, promote it to owner and update email
+-- Agent users with placeholder passwords (will be updated by post-migration script)
+-- These are created with a temporary hash that will be replaced
+-- AI agents use 'agent' role to distinguish from human admins
+INSERT INTO
+    users (name, email, password_hash, role, avatar_url, active)
+VALUES 
+    ('MosBot', 'coo@mosbot.local', 'PLACEHOLDER', 'agent', null, true),
+    ('Elon', 'cto@mosbot.local', 'PLACEHOLDER', 'agent', null, true),
+    ('Gary', 'cmo@mosbot.local', 'PLACEHOLDER', 'agent', null, true),
+    ('Alex', 'cpo@mosbot.local', 'PLACEHOLDER', 'agent', null, true)
+ON CONFLICT (email) DO NOTHING;
+
+-- Backward compatibility: Promote legacy owner@mosbot.local or admin@mosbot.local to CEO
 DO $$ 
 BEGIN
-  IF NOT EXISTS (SELECT 1 FROM users WHERE role = 'owner') THEN
+  -- If ceo@mosbot.local doesn't exist but owner@mosbot.local does, update it
+  IF NOT EXISTS (SELECT 1 FROM users WHERE email = 'ceo@mosbot.local') THEN
     UPDATE users 
-    SET role = 'owner', name = 'Owner', email = 'owner@mosbot.local'
-    WHERE email = 'admin@mosbot.local' 
-    AND role = 'admin';
+    SET email = 'ceo@mosbot.local', name = 'Marcelo Oliveira'
+    WHERE email = 'owner@mosbot.local';
+  END IF;
+  
+  -- If ceo@mosbot.local still doesn't exist but admin@mosbot.local does, update it
+  IF NOT EXISTS (SELECT 1 FROM users WHERE email = 'ceo@mosbot.local') THEN
+    UPDATE users 
+    SET email = 'ceo@mosbot.local', name = 'Marcelo Oliveira', role = 'owner'
+    WHERE email = 'admin@mosbot.local';
   END IF;
 END $$;
+
+-- Add comment to document the role hierarchy
+COMMENT ON COLUMN users.role IS 'User role: owner (CEO only), agent (AI agents), admin (deprecated, use agent), user (regular users)';

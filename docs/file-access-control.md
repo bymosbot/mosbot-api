@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the role-based access control (RBAC) implementation for OpenClaw workspace file operations. Access to view and modify workspace files is now restricted to users with `admin` or `owner` roles.
+This document describes the role-based access control (RBAC) implementation for OpenClaw workspace file operations. Access to view and modify workspace files is now restricted to users with `agent`, `admin` or `owner` roles.
 
 ## Changes Made
 
@@ -32,7 +32,7 @@ This document describes the role-based access control (RBAC) implementation for 
 **After:**
 
 - Requires authentication AND admin role (`requireAuth`, `requireAdmin`)
-- Only `admin` and `owner` roles can read file contents
+- Only `agent`, `admin` and `owner` roles can read file contents
 - Regular users receive `403 Forbidden` response
 
 #### 3. Write Operations (Already Protected)

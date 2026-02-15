@@ -798,9 +798,9 @@ Response `200`:
 { "data": { "id": "uuid", "name": "...", "email": "...", "avatar_url": null, "created_at": "...", "updated_at": "..." } }
 ```
 
-## Admin user management (admin/owner only)
+## Admin user management (agent/admin/owner only)
 
-These endpoints require admin or owner role.
+These endpoints require agent, admin or owner role.
 
 ### GET `/admin/users`
 
@@ -870,7 +870,7 @@ Request body:
 
 Notes:
 
-- `role` defaults to `user` if omitted. Valid values: `admin`, `user` (owner role cannot be assigned via this endpoint)
+- `role` defaults to `user` if omitted. Valid values: `agent`, `admin`, `user` (owner role cannot be assigned via this endpoint)
 - `password` must be at least 8 characters
 - User is created as active by default
 
@@ -1048,7 +1048,7 @@ Errors:
 
 - `400` missing or invalid path
 - `401` authentication required
-- `403` admin/owner role required
+- `403` agent/admin/owner role required
 - `404` file not found
 - `503` OpenClaw service not configured or unavailable
 
@@ -1087,7 +1087,7 @@ Errors:
 
 - `400` missing path or content, or invalid path
 - `401` authentication required
-- `403` admin/owner role required
+- `403` agent/admin/owner role required
 - `409` file already exists (use `PUT` to update)
 - `503` OpenClaw service not configured or unavailable
 
@@ -1120,7 +1120,7 @@ Errors:
 
 - `400` missing path or content, or invalid path
 - `401` authentication required
-- `403` admin/owner role required
+- `403` agent/admin/owner role required
 - `404` file not found (use `POST` to create)
 - `503` OpenClaw service not configured or unavailable
 
@@ -1138,7 +1138,7 @@ Errors:
 
 - `400` missing or invalid path
 - `401` authentication required
-- `403` admin/owner role required
+- `403` agent/admin/owner role required
 - `404` file not found
 - `503` OpenClaw service not configured or unavailable
 

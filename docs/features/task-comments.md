@@ -174,7 +174,7 @@ Comments are managed locally in `TaskModal` component state:
 Frontend checks current user against comment author:
 ```javascript
 const isAuthor = currentUser?.id === comment.author_id;
-const isAdminOrOwner = currentUser?.role === 'admin' || currentUser?.role === 'owner';
+const isAdminOrOwner = currentUser?.role === 'admin' || currentUser?.role === 'agent' || currentUser?.role === 'owner';
 const canEdit = isAuthor || isAdminOrOwner;
 ```
 

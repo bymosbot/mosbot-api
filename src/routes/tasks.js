@@ -1069,9 +1069,9 @@ router.patch('/:taskId/comments/:commentId', optionalAuth, validateUUID('taskId'
 
     const existingComment = existingResult.rows[0];
 
-    // Authorization check: only author or admin/owner can edit
+    // Authorization check: only author or admin/agent/owner can edit
     const isAuthor = existingComment.author_id === req.user.id;
-    const isAdminOrOwner = req.user.role === 'admin' || req.user.role === 'owner';
+    const isAdminOrOwner = req.user.role === 'admin' || req.user.role === 'agent' || req.user.role === 'owner';
 
     if (!isAuthor && !isAdminOrOwner) {
       await client.query('ROLLBACK');
@@ -1162,9 +1162,9 @@ router.delete('/:taskId/comments/:commentId', optionalAuth, validateUUID('taskId
 
     const existingComment = existingResult.rows[0];
 
-    // Authorization check: only author or admin/owner can delete
+    // Authorization check: only author or admin/agent/owner can delete
     const isAuthor = existingComment.author_id === req.user.id;
-    const isAdminOrOwner = req.user.role === 'admin' || req.user.role === 'owner';
+    const isAdminOrOwner = req.user.role === 'admin' || req.user.role === 'agent' || req.user.role === 'owner';
 
     if (!isAuthor && !isAdminOrOwner) {
       await client.query('ROLLBACK');

@@ -88,6 +88,16 @@ async function runMigration(client, filename, sql) {
 
     await client.query('COMMIT');
     logger.info(`Applied migration: ${filename}`);
+    
+    // Check for post-migration hook
+    const postMigrationPath = path.join(__dirname, 'migrations', filename.replace('.sql', '.post.js'));
+    if (fs.existsSync(postMigrationPath)) {
+      logger.info(`Running post-migration hook: ${filename}.post.js`);
+      const postMigration = require(postMigrationPath);
+      await postMigration(client, logger);
+      logger.info(`Completed post-migration hook: ${filename}.post.js`);
+    }
+    
     return true;
   } catch (error) {
     await client.query('ROLLBACK');

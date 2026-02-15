@@ -189,13 +189,14 @@ async function invokeTool(tool, args = {}, options = {}) {
 /**
  * List sessions via sessions_list tool
  * @param {object} params - Query parameters
+ * @param {string} params.sessionKey - Full session key for agent context (e.g., 'main', 'agent:coo:main')
  * @param {string[]} params.kinds - Filter by session kinds (main, group, cron, hook, node, other)
  * @param {number} params.limit - Max rows to return
  * @param {number} params.activeMinutes - Only sessions updated within N minutes
  * @param {number} params.messageLimit - Include last N messages per session (0 = no messages)
  * @returns {Promise<Array>} Array of session rows
  */
-async function sessionsList({ kinds, limit, activeMinutes, messageLimit } = {}) {
+async function sessionsList({ sessionKey = 'main', kinds, limit, activeMinutes, messageLimit } = {}) {
   const args = {};
   
   if (kinds) args.kinds = kinds;
@@ -204,9 +205,35 @@ async function sessionsList({ kinds, limit, activeMinutes, messageLimit } = {}) 
   if (messageLimit != null) args.messageLimit = messageLimit;
   
   try {
-    const result = await invokeTool('sessions_list', args);
-    // sessions_list returns an array of session rows
-    return result || [];
+    const result = await invokeTool('sessions_list', args, { sessionKey });
+    // sessions_list returns various structures depending on the tool implementation
+    if (!result) {
+      return [];
+    }
+    
+    // Handle direct array response
+    if (Array.isArray(result)) {
+      return result;
+    }
+    
+    // Handle { details: { sessions: [...] } } structure (OpenClaw Gateway format)
+    if (result.details && Array.isArray(result.details.sessions)) {
+      return result.details.sessions;
+    }
+    
+    // Handle { rows: [...] } structure
+    if (result.rows && Array.isArray(result.rows)) {
+      return result.rows;
+    }
+    
+    // Handle { sessions: [...] } structure
+    if (result.sessions && Array.isArray(result.sessions)) {
+      return result.sessions;
+    }
+    
+    // Fallback to empty array if structure is unexpected
+    logger.warn('Unexpected sessions_list result structure', { result });
+    return [];
   } catch (error) {
     // If service is not configured, return empty array (graceful degradation)
     if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
@@ -248,10 +275,80 @@ async function sessionsHistory({ sessionKey, limit, includeTools } = {}) {
   }
 }
 
+/**
+ * List cron jobs from the OpenClaw Gateway scheduler.
+ * Tries the cron.list tool first (via /tools/invoke), then falls back to
+ * reading the persisted jobs.json from the workspace service.
+ * @returns {Promise<Array>} Array of cron job objects
+ */
+async function cronList() {
+  // Attempt 1: Try cron.list via /tools/invoke
+  try {
+    const result = await invokeTool('cron.list', {});
+    if (result) {
+      const jobs = extractJobsArray(result);
+      if (jobs.length > 0) {
+        logger.info('cron.list returned jobs via /tools/invoke', { count: jobs.length });
+        return jobs;
+      }
+    }
+  } catch (error) {
+    if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
+      logger.warn('OpenClaw gateway not available for cron.list, returning empty array');
+      return [];
+    }
+    // Log and fall through to fallback
+    logger.warn('cron.list tool invocation failed, trying jobs.json fallback', {
+      error: error.message,
+      code: error.code,
+    });
+  }
+
+  // Attempt 2: Read the persisted jobs.json from the workspace service
+  // OpenClaw stores cron jobs at ~/.openclaw/cron/jobs.json on the gateway host.
+  // In containerized setups this is typically at /home/node/.openclaw/cron/jobs.json
+  // which may be accessible via the workspace service.
+  try {
+    const { getFileContent } = require('./openclawWorkspaceClient');
+    const content = await getFileContent('/cron/jobs.json');
+    if (content) {
+      const parsed = JSON.parse(typeof content === 'string' ? content : content.content || content);
+      const jobs = extractJobsArray(parsed);
+      if (jobs.length > 0) {
+        logger.info('cron jobs loaded from jobs.json fallback', { count: jobs.length });
+        return jobs;
+      }
+    }
+  } catch (fallbackError) {
+    logger.warn('jobs.json fallback also failed', {
+      error: fallbackError.message,
+    });
+  }
+
+  return [];
+}
+
+/**
+ * Extract a flat array of jobs from various response shapes
+ */
+function extractJobsArray(data) {
+  if (!data) return [];
+  if (Array.isArray(data)) return data;
+  if (data.jobs && Array.isArray(data.jobs)) return data.jobs;
+  if (data.details && Array.isArray(data.details.jobs)) return data.details.jobs;
+  // jobs.json stores as { "jobs": { "<id>": {...}, ... } } map
+  if (data.jobs && typeof data.jobs === 'object' && !Array.isArray(data.jobs)) {
+    return Object.values(data.jobs);
+  }
+  if (data.jobId || data.name) return [data];
+  return [];
+}
+
 module.exports = {
   invokeTool,
   sessionsList,
   sessionsHistory,
+  cronList,
   sleep,
   isRetryableError
 };

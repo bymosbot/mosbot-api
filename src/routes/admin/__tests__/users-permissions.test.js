@@ -3,7 +3,7 @@
  * 
  * These tests verify that the middleware is correctly applied:
  * - GET requests (list/view) require only authentication
- * - POST/PUT/DELETE requests require admin role
+ * - POST/PUT/DELETE requests require agent/admin/owner role
  */
 
 const express = require('express');

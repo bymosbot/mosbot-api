@@ -2,7 +2,7 @@
 
 ## Overview
 
-Updated the admin users endpoint to allow all authenticated users to view the user list, while keeping create/update/delete operations restricted to admin/owner roles only.
+Updated the admin users endpoint to allow all authenticated users to view the user list, while keeping create/update/delete operations restricted to agent/admin/owner roles only.
 
 ## Changes Made
 
@@ -222,7 +222,7 @@ This change aligns with the file access permission model:
 Both follow the same pattern:
 
 - **Browse/View**: Available to all authenticated users
-- **Modify**: Restricted to admin/owner roles
+- **Modify**: Restricted to agent/admin/owner roles
 
 ## Related Documentation
 

@@ -99,11 +99,11 @@ router.post('/', requireAdmin, async (req, res, next) => {
       });
     }
     
-    // Only admin and user roles can be assigned via admin endpoints (not owner)
-    const validRoles = ['admin', 'user'];
+    // Only agent, admin and user roles can be assigned via admin endpoints (not owner)
+    const validRoles = ['agent', 'admin', 'user'];
     if (role && !validRoles.includes(role)) {
       return res.status(400).json({ 
-        error: { message: 'Invalid role. Only admin and user roles can be assigned.', status: 400 } 
+        error: { message: 'Invalid role. Only agent, admin and user roles can be assigned.', status: 400 } 
       });
     }
     
@@ -146,9 +146,9 @@ router.put('/:id', requireAdmin, validateUUID('id'), async (req, res, next) => {
     
     const targetUser = existing.rows[0];
     
-    // Admin cannot edit owner
-    if (req.user.role === 'admin' && targetUser.role === 'owner') {
-      logger.warn('Owner protection violation: Admin attempted to edit owner account', {
+    // Admin/Agent cannot edit owner
+    if ((req.user.role === 'admin' || req.user.role === 'agent') && targetUser.role === 'owner') {
+      logger.warn('Owner protection violation: Admin/Agent attempted to edit owner account', {
         action: 'update_user',
         actor_id: req.user.id,
         actor_role: req.user.role,
@@ -211,14 +211,14 @@ router.put('/:id', requireAdmin, validateUUID('id'), async (req, res, next) => {
       });
     }
     
-    // Only admin and user roles can be assigned via admin endpoints (not owner)
+    // Only agent, admin and user roles can be assigned via admin endpoints (not owner)
     // Exception: owner can keep their own role when updating themselves
-    const validRoles = ['admin', 'user'];
+    const validRoles = ['agent', 'admin', 'user'];
     if (role !== undefined && !validRoles.includes(role)) {
       // Allow 'owner' role only if target user is already owner
       if (role !== 'owner' || targetUser.role !== 'owner') {
         return res.status(400).json({ 
-          error: { message: 'Invalid role. Only admin and user roles can be assigned.', status: 400 } 
+          error: { message: 'Invalid role. Only agent, admin and user roles can be assigned.', status: 400 } 
         });
       }
     }
@@ -340,9 +340,9 @@ router.delete('/:id', requireAdmin, validateUUID('id'), async (req, res, next) =
       });
     }
     
-    // Admin cannot delete owner
-    if (req.user.role === 'admin' && targetUser.rows[0].role === 'owner') {
-      logger.warn('Owner protection violation: Admin attempted to delete owner account', {
+    // Admin/Agent cannot delete owner
+    if ((req.user.role === 'admin' || req.user.role === 'agent') && targetUser.rows[0].role === 'owner') {
+      logger.warn('Owner protection violation: Admin/Agent attempted to delete owner account', {
         action: 'delete_user',
         actor_id: req.user.id,
         actor_role: req.user.role,
