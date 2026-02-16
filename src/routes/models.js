@@ -1,55 +1,57 @@
 const express = require('express');
 const router = express.Router();
-const fs = require('fs');
-const path = require('path');
 const logger = require('../utils/logger');
+const { makeOpenClawRequest } = require('../services/openclawWorkspaceClient');
 
-// Load models config
-const modelsConfigPath = path.join(__dirname, '../config/models.json');
-let modelsConfig = null;
-
-try {
-  const configData = fs.readFileSync(modelsConfigPath, 'utf8');
-  modelsConfig = JSON.parse(configData);
-  const modelCount = modelsConfig.models && typeof modelsConfig.models === 'object'
-    ? Object.keys(modelsConfig.models).length
-    : 0;
-  logger.info('Models config loaded successfully', { modelCount });
-} catch (error) {
-  logger.error('Failed to load models config', error);
-  modelsConfig = { models: {}, defaultModel: null };
-}
-
-// Transform models object to array for API response
-function getModelsForApi() {
-  if (!modelsConfig?.models || typeof modelsConfig.models !== 'object') {
-    return [];
-  }
-  return Object.entries(modelsConfig.models).map(([id, config]) => ({
-    id,
-    name: config.alias || id,
-    params: config.params || {},
-    provider: id.split('/')[1] || null,
-  }));
-}
-
-// GET /api/v1/models - List available AI models
+// GET /api/v1/models - List available AI models from OpenClaw config
+// Returns models from openclaw.json (OpenClaw is the source of truth)
 router.get('/', async (req, res, next) => {
   try {
+    // Read openclaw.json from workspace service
+    const configData = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+    const config = JSON.parse(configData.content);
+    
+    // Extract models from agents.defaults.models section
+    const modelsObj = config?.agents?.defaults?.models || {};
+    const defaultModel = config?.agents?.defaults?.model?.primary || null;
+    
+    // Transform to API response shape (only OpenClaw-supported fields)
+    const models = Object.entries(modelsObj).map(([id, modelConfig]) => ({
+      id,
+      name: modelConfig.alias || id,
+      params: modelConfig.params || {},
+      isDefault: id === defaultModel,
+    }));
+    
+    // Sort by name for consistent ordering
+    models.sort((a, b) => a.name.localeCompare(b.name));
+    
     res.json({
       data: {
-        models: getModelsForApi(),
-        defaultModel: modelsConfig.defaultModel
+        models,
+        defaultModel
       }
     });
   } catch (error) {
+    // If OpenClaw is not available, log and return empty list
+    if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
+      logger.warn('OpenClaw not available, returning empty model list', { error: error.message });
+      return res.json({
+        data: {
+          models: [],
+          defaultModel: null
+        }
+      });
+    }
+    
+    logger.error('Failed to fetch models from OpenClaw config', { error: error.message });
     next(error);
   }
 });
 
 // Helper function to get provider for a model ID (from path: openrouter/anthropic/... -> anthropic)
 function getProviderForModel(modelId) {
-  if (!modelsConfig?.models || !modelId) {
+  if (!modelId) {
     return null;
   }
   const segments = modelId.split('/');

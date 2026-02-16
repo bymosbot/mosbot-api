@@ -339,15 +339,26 @@ router.get('/agents', requireAuth, async (req, res, next) => {
       });
       
       res.json({
-        data: [{
-          id: 'coo',
-          name: 'COO',
-          label: 'Chief Operating Officer',
-          description: 'Operations and workflow management',
-          icon: '📊',
-          workspace: '/home/node/.openclaw/workspace-coo',
-          isDefault: true
-        }]
+        data: [
+          {
+            id: 'coo',
+            name: 'COO',
+            label: 'Chief Operating Officer',
+            description: 'Operations and workflow management',
+            icon: '📊',
+            workspace: '/home/node/.openclaw/workspace-coo',
+            isDefault: true
+          },
+          {
+            id: 'archived',
+            name: 'Archived',
+            label: 'Archived (Old Main)',
+            description: 'Archived workspace files from previous iteration',
+            icon: '📦',
+            workspace: '/home/node/.openclaw/_archived_workspace_main',
+            isDefault: false
+          }
+        ]
       });
     }
   } catch (error) {
@@ -710,6 +721,20 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
       if (lastMessageText && lastMessageText.length > 200) {
         lastMessageText = lastMessageText.substring(0, 200) + '...';
       }
+      // OpenClaw strips HEARTBEAT_OK from replies; when a heartbeat run completes OK
+      // the last message may be empty. Infer HEARTBEAT_OK for heartbeat sessions with
+      // token usage but no visible reply.
+      // Check displayName/sessionLabel first (explicit labels), then key as fallback
+      const displayName = (session.displayName || session.sessionLabel || '').toString().toLowerCase();
+      const sessionKey = (session.key || '').toString().toLowerCase();
+      // Heartbeat sessions have explicit "heartbeat" in displayName/label, or key ends with ":heartbeat"
+      const isHeartbeatSession = displayName.includes('heartbeat') || 
+                                 sessionKey.endsWith(':heartbeat') ||
+                                 sessionKey.includes(':heartbeat:');
+      const hasUsage = inputTokens > 0 || outputTokens > 0;
+      if (!lastMessageText && isHeartbeatSession && hasUsage) {
+        lastMessageText = 'HEARTBEAT_OK';
+      }
       
       return {
         id: session.sessionId || session.id,
@@ -759,6 +784,234 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
   }
 });
 
+// GET /api/v1/openclaw/sessions/:sessionId/messages
+// Get full message history for a specific session
+router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) => {
+  try {
+    const { sessionId } = req.params;
+    const { key: sessionKey, limit = 50, includeTools = false } = req.query;
+    
+    logger.info('Fetching session message history', { 
+      userId: req.user.id,
+      sessionId,
+      sessionKey,
+      limit,
+      includeTools
+    });
+    
+    // sessionKey is required since sessionsHistory needs it
+    if (!sessionKey) {
+      return res.status(400).json({
+        error: 'Session key is required as a query parameter (key=...)'
+      });
+    }
+    
+    const { sessionsHistory, sessionsList } = require('../services/openclawGatewayClient');
+    
+    // Fetch full message history
+    const historyResult = await sessionsHistory({
+      sessionKey,
+      limit: parseInt(limit, 10),
+      includeTools: includeTools === 'true' || includeTools === true
+    });
+    
+    // Log raw result for debugging empty sessions with usage data
+    logger.debug('sessionsHistory raw result', {
+      sessionKey,
+      resultType: Array.isArray(historyResult) ? 'array' : typeof historyResult,
+      resultKeys: historyResult && typeof historyResult === 'object' ? Object.keys(historyResult) : null,
+      isNull: historyResult === null,
+      isUndefined: historyResult === undefined
+    });
+    
+    // Check for forbidden response (agent-to-agent access disabled)
+    if (historyResult?.details?.status === 'forbidden') {
+      logger.warn('Agent-to-agent history access forbidden', {
+        sessionKey,
+        error: historyResult.details.error
+      });
+      
+      return res.status(403).json({
+        error: {
+          message: 'Agent session history is not accessible. Agent-to-agent access is disabled in OpenClaw Gateway.',
+          code: 'AGENT_TO_AGENT_DISABLED',
+          hint: 'Enable agent-to-agent access by setting tools.agentToAgent.enabled=true in OpenClaw Gateway configuration',
+          details: historyResult.details
+        }
+      });
+    }
+    
+    // Ensure we have an array of messages
+    // sessionsHistory may return different structures:
+    // - Direct array: [...]
+    // - { messages: [...] }
+    // - { details: { messages: [...] } }
+    let messages = [];
+    if (Array.isArray(historyResult)) {
+      messages = historyResult;
+    } else if (historyResult && Array.isArray(historyResult.messages)) {
+      messages = historyResult.messages;
+    } else if (historyResult && historyResult.details && Array.isArray(historyResult.details.messages)) {
+      messages = historyResult.details.messages;
+    } else if (historyResult && typeof historyResult === 'object') {
+      logger.warn('Unexpected sessionsHistory result structure', { 
+        sessionKey,
+        result: historyResult,
+        resultKeys: Object.keys(historyResult)
+      });
+      messages = [];
+    }
+    
+    logger.info('Session history loaded', { 
+      userId: req.user.id,
+      sessionKey,
+      messageCount: messages.length,
+      rawMessageCount: Array.isArray(historyResult) ? historyResult.length : 
+                       historyResult?.messages?.length || 
+                       historyResult?.details?.messages?.length || 0
+    });
+    
+    // Also fetch session metadata to include in response
+    // We need to query the agent's session list to get the full session details
+    // Extract agent from sessionKey (e.g., "agent:coo:main" -> "coo")
+    let agentSessionKey = 'main';
+    if (sessionKey.startsWith('agent:')) {
+      const keyParts = sessionKey.split(':');
+      if (keyParts.length >= 2) {
+        const agentId = keyParts[1];
+        agentSessionKey = agentId === 'main' ? 'main' : `agent:${agentId}:main`;
+      }
+    }
+    
+    // Query the agent's session list to get full session metadata
+    const sessions = await sessionsList({
+      sessionKey: agentSessionKey,
+      limit: 500,
+      messageLimit: 0 // We don't need messages here, just metadata
+    });
+    
+    // Find the session matching our sessionId
+    const session = sessions.find(s => 
+      (s.sessionId === sessionId) || (s.id === sessionId)
+    );
+    
+    // Transform messages for the dashboard
+    // Messages are returned in chronological order (oldest first)
+    const transformedMessages = messages.map((msg, index) => {
+      // Extract text content, handling both string and array formats
+      let content = null;
+      if (typeof msg.content === 'string') {
+        content = msg.content;
+      } else if (Array.isArray(msg.content)) {
+        // Find text blocks (skip thinking blocks and tool calls)
+        const textBlocks = msg.content.filter(c => c.type === 'text');
+        content = textBlocks.map(c => c.text).join('\n\n');
+      }
+      
+      // Build model string
+      let model = null;
+      if (msg.provider && msg.model) {
+        model = `${msg.provider}/${msg.model}`;
+      } else if (msg.model) {
+        model = msg.model;
+      }
+      
+      return {
+        index,
+        role: msg.role || 'unknown',
+        content,
+        model,
+        provider: msg.provider || null,
+        timestamp: msg.timestamp || null
+      };
+    });
+    
+    // Build session metadata for context
+    let sessionMetadata = {
+      id: sessionId,
+      key: sessionKey,
+      label: sessionId,
+      agent: 'unknown',
+      status: 'unknown'
+    };
+    
+    if (session) {
+      // Extract agent name from session key
+      let agentName = 'unknown';
+      if (session.key) {
+        const keyParts = session.key.split(':');
+        if (keyParts.length >= 2 && keyParts[0] === 'agent') {
+          agentName = keyParts[1];
+        }
+      }
+      
+      // Determine status based on updatedAt
+      const RUNNING_THRESHOLD_MS = 2 * 60 * 1000;  // 2 minutes
+      const ACTIVE_THRESHOLD_MS = 30 * 60 * 1000;  // 30 minutes
+      const now = Date.now();
+      const updatedAtMs = session.updatedAt || 0;
+      const timeSinceUpdate = now - updatedAtMs;
+      let status;
+      if (timeSinceUpdate <= RUNNING_THRESHOLD_MS) {
+        status = 'running';
+      } else if (timeSinceUpdate <= ACTIVE_THRESHOLD_MS) {
+        status = 'active';
+      } else {
+        status = 'idle';
+      }
+      
+      sessionMetadata = {
+        id: sessionId,
+        key: session.key || sessionKey,
+        label: session.displayName || session.sessionLabel || sessionId,
+        agent: agentName,
+        status,
+        kind: session.kind || 'main',
+        updatedAt: session.updatedAt || null,
+        contextTokens: session.contextTokens || 0,
+        totalTokensUsed: session.totalTokens || 0,
+        contextUsagePercent: session.contextTokens > 0 
+          ? Math.round((session.totalTokens / session.contextTokens) * 100 * 10) / 10 
+          : 0
+      };
+    }
+    
+    logger.info('Returning session messages', {
+      userId: req.user.id,
+      sessionId,
+      messageCount: transformedMessages.length
+    });
+    
+    res.json({
+      data: {
+        messages: transformedMessages,
+        session: sessionMetadata
+      }
+    });
+  } catch (error) {
+    // If OpenClaw Gateway is not configured, return empty array
+    if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
+      logger.warn('OpenClaw Gateway not available for session messages, returning empty', {
+        userId: req.user.id,
+        sessionId: req.params.sessionId
+      });
+      return res.json({ 
+        data: { 
+          messages: [], 
+          session: { 
+            id: req.params.sessionId, 
+            key: req.query.key || null,
+            label: req.params.sessionId,
+            agent: 'unknown',
+            status: 'unknown'
+          } 
+        } 
+      });
+    }
+    next(error);
+  }
+});
+
 // GET /api/v1/openclaw/cron-jobs
 // Get all scheduled/recurring jobs: gateway cron jobs + agent heartbeats from config
 router.get('/cron-jobs', requireAuth, async (req, res, next) => {
@@ -767,6 +1020,15 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
 
     // Fetch gateway cron jobs and config heartbeats in parallel
     const { cronList } = require('../services/openclawGatewayClient');
+
+    // Get OpenClaw config for agent enrichment
+    let openclawConfig = null;
+    try {
+      const configData = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+      openclawConfig = JSON.parse(configData.content);
+    } catch (configErr) {
+      logger.warn('Could not read OpenClaw config for agent enrichment', { error: configErr.message });
+    }
 
     const [gatewayJobs, heartbeatJobs] = await Promise.all([
       // 1. Gateway scheduler jobs (orchestration, memory flush, etc.)
@@ -835,6 +1097,10 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
                 payload: {
                   kind: 'heartbeat',
                   model: hb.model || null,
+                  session: hb.session || 'main',
+                  target: hb.target || 'last',
+                  prompt: hb.prompt || null,
+                  ackMaxChars: hb.ackMaxChars || 200,
                 },
                 delivery: {
                   mode: hb.target === 'last' ? 'announce (last)' : (hb.target || 'none'),
@@ -936,16 +1202,29 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
       return normalized;
     });
 
-    const allJobs = [...taggedGatewayJobs, ...heartbeatJobs];
+    // Enrich jobs with agent model information
+    const agentsList = openclawConfig?.agents?.list || [];
+    const enrichedJobs = [...taggedGatewayJobs, ...heartbeatJobs].map(job => {
+      if (job.agentId && agentsList.length > 0) {
+        const agent = agentsList.find(a => a.id === job.agentId);
+        if (agent && agent.model) {
+          return {
+            ...job,
+            agentModel: agent.model?.primary || agent.model || null
+          };
+        }
+      }
+      return job;
+    });
 
     logger.info('Cron jobs aggregated', {
       userId: req.user.id,
       gateway: taggedGatewayJobs.length,
       heartbeats: heartbeatJobs.length,
-      total: allJobs.length,
+      total: enrichedJobs.length,
     });
 
-    res.json({ data: allJobs });
+    res.json({ data: enrichedJobs });
   } catch (error) {
     if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
       logger.warn('OpenClaw not available for cron jobs, returning empty array', {
@@ -967,5 +1246,124 @@ function parseInterval(str) {
   const multipliers = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
   return value * (multipliers[unit] || 60000);
 }
+
+// POST /api/v1/openclaw/cron-jobs
+// Create a new gateway cron job (admin only)
+router.post('/cron-jobs', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { createCronJob } = require('../services/cronJobsService');
+    
+    logger.info('Creating cron job', { 
+      userId: req.user.id,
+      name: req.body.name 
+    });
+    
+    const job = await createCronJob(req.body);
+    
+    res.status(201).json({ data: job });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PUT /api/v1/openclaw/cron-jobs/:jobId
+// Update an existing cron job (admin only)
+// Supports both gateway jobs and heartbeat (config) jobs
+router.put('/cron-jobs/:jobId', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { updateCronJob, updateHeartbeatJob } = require('../services/cronJobsService');
+    const { jobId } = req.params;
+    
+    logger.info('Updating cron job', { 
+      userId: req.user.id,
+      jobId,
+      name: req.body.name 
+    });
+    
+    // Check if this is a heartbeat job (jobId starts with 'heartbeat-')
+    const isHeartbeat = jobId.startsWith('heartbeat-');
+    
+    let job;
+    if (isHeartbeat) {
+      job = await updateHeartbeatJob(jobId, req.body);
+    } else {
+      job = await updateCronJob(jobId, req.body);
+    }
+    
+    res.json({ data: job });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// PATCH /api/v1/openclaw/cron-jobs/:jobId/enabled
+// Toggle enabled state for a cron job (admin only)
+// Note: Heartbeat jobs cannot be enabled/disabled via this endpoint
+router.patch('/cron-jobs/:jobId/enabled', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { setCronJobEnabled } = require('../services/cronJobsService');
+    const { jobId } = req.params;
+    const { enabled } = req.body;
+    
+    if (typeof enabled !== 'boolean') {
+      return res.status(400).json({
+        error: { message: 'enabled must be a boolean', status: 400 }
+      });
+    }
+    
+    // Heartbeat jobs cannot be enabled/disabled separately
+    if (jobId.startsWith('heartbeat-')) {
+      return res.status(400).json({
+        error: { 
+          message: 'Heartbeat jobs cannot be enabled/disabled via this endpoint. Edit the heartbeat configuration instead.', 
+          status: 400 
+        }
+      });
+    }
+    
+    logger.info('Toggling cron job enabled state', { 
+      userId: req.user.id,
+      jobId,
+      enabled 
+    });
+    
+    const job = await setCronJobEnabled(jobId, enabled);
+    
+    res.json({ data: job });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// DELETE /api/v1/openclaw/cron-jobs/:jobId
+// Delete a gateway cron job (admin only)
+// Note: Heartbeat jobs cannot be deleted (they're defined in OpenClaw config)
+router.delete('/cron-jobs/:jobId', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { deleteCronJob } = require('../services/cronJobsService');
+    const { jobId } = req.params;
+    
+    // Heartbeat jobs cannot be deleted
+    if (jobId.startsWith('heartbeat-')) {
+      return res.status(400).json({
+        error: { 
+          message: 'Heartbeat jobs cannot be deleted. They are defined in OpenClaw configuration.', 
+          status: 400 
+        }
+      });
+    }
+    
+    logger.info('Deleting cron job', { 
+      userId: req.user.id,
+      jobId 
+    });
+    
+    await deleteCronJob(jobId);
+    
+    res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
+});
 
 module.exports = router;

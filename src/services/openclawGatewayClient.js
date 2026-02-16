@@ -263,12 +263,38 @@ async function sessionsHistory({ sessionKey, limit, includeTools } = {}) {
   
   try {
     const result = await invokeTool('sessions_history', args);
+    
+    // Log detailed information about the result for debugging
+    logger.info('sessions_history tool result', {
+      sessionKey,
+      resultType: Array.isArray(result) ? 'array' : typeof result,
+      resultKeys: result && typeof result === 'object' ? Object.keys(result) : null,
+      messagesCount: result?.messages?.length || (Array.isArray(result) ? result.length : 0),
+      hasMessages: !!(result?.messages || Array.isArray(result)),
+      isNull: result === null,
+      isUndefined: result === undefined
+    });
+    
     // sessions_history returns { messages: [...] } or just an array
-    return result?.messages || result || [];
+    const messages = result?.messages || result || [];
+    
+    // Warn if we got an empty result for a session that should have data
+    if ((!messages || messages.length === 0) && sessionKey) {
+      logger.warn('sessions_history returned empty messages', {
+        sessionKey,
+        args,
+        resultType: typeof result,
+        result: result ? JSON.stringify(result).substring(0, 200) : null
+      });
+    }
+    
+    return messages;
   } catch (error) {
     // If service is not configured, return empty array (graceful degradation)
     if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
-      logger.warn('OpenClaw gateway not available for sessions_history, returning empty array');
+      logger.warn('OpenClaw gateway not available for sessions_history, returning empty array', {
+        sessionKey
+      });
       return [];
     }
     throw error;

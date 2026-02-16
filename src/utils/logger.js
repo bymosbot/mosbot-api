@@ -20,8 +20,9 @@ function log(level, message, metadata = {}) {
   };
   
   // Use appropriate console method based on level
-  const logMethod = level === 'error' ? console.error : 
-                    level === 'warn' ? console.warn : 
+  const logMethod = level === 'error' ? console.error :
+                    level === 'warn' ? console.warn :
+                    level === 'debug' ? console.debug :
                     console.log;
   
   logMethod(JSON.stringify(logEntry));
@@ -32,6 +33,13 @@ function log(level, message, metadata = {}) {
  */
 function info(message, metadata) {
   log('info', message, metadata);
+}
+
+/**
+ * Log debug level messages (typically not shown in production unless LOG_LEVEL=debug)
+ */
+function debug(message, metadata) {
+  log('debug', message, metadata);
 }
 
 /**
@@ -51,5 +59,6 @@ function error(message, metadata) {
 module.exports = {
   info,
   warn,
-  error
+  error,
+  debug
 };
