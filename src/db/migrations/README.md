@@ -5,7 +5,7 @@
 The database schema is consolidated into a single initial migration:
 
 - `000_create_migrations_table.sql` - Creates the migrations tracking table
-- `001_initial_schema.sql` - Complete database schema with all features
+- `001_initial_schema.sql` - Complete database schema with all features (includes agent_id linkage)
 
 ## Migration 001 Features
 
@@ -13,7 +13,8 @@ The consolidated `001_initial_schema.sql` includes:
 
 ### Tables
 
-- **users** - User accounts with role-based access (owner, agent, admin [deprecated], user)
+- **users** - User accounts with role-based access (owner, agent, admin [legacy, still supported], user)
+  - Includes `agent_id` field linking agent users to OpenClaw agent config entries
 - **tasks** - Task management with full feature set
 - **task_comments** - Per-task discussion threads
 - **task_dependencies** - Task blocking relationships
@@ -34,13 +35,13 @@ The consolidated `001_initial_schema.sql` includes:
 
 Organization users based on org chart:
 
-| User | Email | Role | Password |
-| ---- | ----- | ---- | -------- |
-| Marcelo Oliveira (CEO) | `ceo@mosbot.local` | `owner` | `admin123` (fixed) |
-| MosBot (COO) | `coo@mosbot.local` | `agent` | Auto-generated (random) |
-| Elon (CTO) | `cto@mosbot.local` | `agent` | Auto-generated (random) |
-| Gary (CMO) | `cmo@mosbot.local` | `agent` | Auto-generated (random) |
-| Alex (CPO) | `cpo@mosbot.local` | `agent` | Auto-generated (random) |
+| User | Email | Role | agent_id | Password |
+| ---- | ----- | ---- | -------- | -------- |
+| Marcelo Oliveira (CEO) | `ceo@mosbot.local` | `owner` | - | `admin123` (fixed) |
+| MosBot (COO) | `coo@mosbot.local` | `agent` | `coo` | Auto-generated (random) |
+| Elon (CTO) | `cto@mosbot.local` | `agent` | `cto` | Auto-generated (random) |
+| Gary (CMO) | `cmo@mosbot.local` | `agent` | `cmo` | Auto-generated (random) |
+| Alex (CPO) | `cpo@mosbot.local` | `agent` | `cpo` | Auto-generated (random) |
 
 **Password Generation:**
 - CEO uses fixed password `admin123` for easy owner access
@@ -49,6 +50,19 @@ Organization users based on org chart:
 - **Credentials are printed to console** during migration - save them securely!
 
 **IMPORTANT:** Change CEO password after first login!
+
+### Agent ID Linkage
+
+The `users` table includes an `agent_id` field for linking agent users to OpenClaw configuration:
+
+- **agent_id** column (unique, nullable TEXT)
+  - Links users with `role='agent'` to their OpenClaw agent config entry
+  - Format: lowercase slug (e.g., `coo`, `cto`, `ops-assistant`)
+  - Constraint: users with `role='agent'` must have a non-null `agent_id`
+  - Validation: `agent_id` must match pattern `^[a-z0-9_-]+$`
+  - Seeded agents are pre-configured with their corresponding agent IDs
+
+This enables the dashboard to manage OpenClaw agent configurations through the `/settings/users` interface.
 
 ## Old Migrations
 

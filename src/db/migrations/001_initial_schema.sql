@@ -78,6 +78,7 @@ CREATE TABLE IF NOT EXISTS users (
     password_hash VARCHAR(255) NOT NULL,
     avatar_url TEXT,
     role VARCHAR(20) DEFAULT 'user',
+    agent_id TEXT UNIQUE,
     active BOOLEAN DEFAULT true,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -87,7 +88,15 @@ CREATE TABLE IF NOT EXISTS users (
     CONSTRAINT check_email_format CHECK (
         email ~* '^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$'
     ),
-    CONSTRAINT check_name_not_empty CHECK (trim(name) != '')
+    CONSTRAINT check_name_not_empty CHECK (trim(name) != ''),
+    CONSTRAINT check_agent_role_requires_agent_id CHECK (
+        (role = 'agent' AND agent_id IS NOT NULL) OR
+        (role != 'agent')
+    ),
+    CONSTRAINT check_agent_id_format CHECK (
+        agent_id IS NULL OR 
+        agent_id ~ '^[a-z0-9_-]+$'
+    )
 );
 
 -- Tasks table (consolidated with all features)
@@ -268,6 +277,8 @@ CREATE INDEX IF NOT EXISTS idx_users_role ON users (role);
 
 CREATE INDEX IF NOT EXISTS idx_users_active ON users (active);
 
+CREATE INDEX IF NOT EXISTS idx_users_agent_id ON users (agent_id);
+
 -- Enforce exactly one owner (partial unique index)
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_single_owner ON users (role)
 WHERE
@@ -411,13 +422,14 @@ VALUES (
 -- Agent users with placeholder passwords (will be updated by post-migration script)
 -- These are created with a temporary hash that will be replaced
 -- AI agents use 'agent' role to distinguish from human admins
+-- agent_id links to their OpenClaw agent configuration
 INSERT INTO
-    users (name, email, password_hash, role, avatar_url, active)
+    users (name, email, password_hash, role, agent_id, avatar_url, active)
 VALUES 
-    ('MosBot', 'coo@mosbot.local', 'PLACEHOLDER', 'agent', null, true),
-    ('Elon', 'cto@mosbot.local', 'PLACEHOLDER', 'agent', null, true),
-    ('Gary', 'cmo@mosbot.local', 'PLACEHOLDER', 'agent', null, true),
-    ('Alex', 'cpo@mosbot.local', 'PLACEHOLDER', 'agent', null, true)
+    ('MosBot', 'coo@mosbot.local', 'PLACEHOLDER', 'agent', 'coo', null, true),
+    ('Elon', 'cto@mosbot.local', 'PLACEHOLDER', 'agent', 'cto', null, true),
+    ('Gary', 'cmo@mosbot.local', 'PLACEHOLDER', 'agent', 'cmo', null, true),
+    ('Alex', 'cpo@mosbot.local', 'PLACEHOLDER', 'agent', 'cpo', null, true)
 ON CONFLICT (email) DO NOTHING;
 
 -- Backward compatibility: Promote legacy owner@mosbot.local or admin@mosbot.local to CEO
@@ -439,4 +451,4 @@ BEGIN
 END $$;
 
 -- Add comment to document the role hierarchy
-COMMENT ON COLUMN users.role IS 'User role: owner (CEO only), agent (AI agents), admin (deprecated, use agent), user (regular users)';
+COMMENT ON COLUMN users.role IS 'User role: owner (CEO only), agent (AI agents), admin (legacy elevated role, still supported), user (regular users)';

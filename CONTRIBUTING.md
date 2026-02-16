@@ -117,7 +117,7 @@ We use ESLint to enforce consistent code style. Run `npm run lint` before commit
 - Keep functions **small and focused**
 - Use **async/await** instead of callbacks
 - Prefix unused variables with `_` (e.g., `_err`, `_next`)
-- Use `console.warn()` or `console.error()` instead of `console.log()` for logging
+- Avoid `console.*` in application code; prefer the project logger if available. (If you must use console for scripts/migrations, keep it scoped and intentional.)
 
 ### Example
 
@@ -158,7 +158,7 @@ function getUser(id, callback) {
 
 When adding new features, follow the existing structure:
 
-```
+```text
 src/
 ├── db/              # Database-related files
 │   ├── pool.js      # Connection pool

@@ -106,5 +106,5 @@ res.status(400).json({ error: { message: '...', status: 400 } });
 ## Related Documentation
 
 - Public API contract: `docs/api/openclaw-public-api.md`
-- Complete integration guide: `docs/implementations/openclaw-workspace/integration-guide.md`
-- Quick start: `docs/implementations/openclaw-workspace/quickstart.md`
+- Canonical workspace docs: `docs/openclaw/workspace/`
+- Legacy integration guide: `docs/openclaw/workspace/legacy/integration-guide.md`
