@@ -2,6 +2,11 @@ const logger = require('../utils/logger');
 const { getFileContent } = require('./openclawWorkspaceClient');
 const pool = require('../db/pool');
 
+// Cache for empty/missing file responses to reduce OpenClaw load
+// When files don't exist (404), cache the empty result for a short time
+const emptyFileCache = new Map();
+const EMPTY_CACHE_TTL_MS = 15000; // 15 seconds
+
 // Helper to parse JSONL files (one JSON object per line)
 function parseJsonl(content) {
   if (!content || typeof content !== 'string') {
@@ -22,6 +27,30 @@ function parseJsonl(content) {
     .filter(Boolean);
 }
 
+// Helper to get file content with caching for empty/missing files
+async function getCachedFileContent(path) {
+  // Check cache first
+  const cached = emptyFileCache.get(path);
+  if (cached && Date.now() < cached.expiresAt) {
+    return null; // Return cached empty result
+  }
+
+  // Fetch from OpenClaw
+  const content = await getFileContent(path);
+  
+  // If file is missing or empty, cache the result
+  if (!content) {
+    emptyFileCache.set(path, {
+      expiresAt: Date.now() + EMPTY_CACHE_TTL_MS
+    });
+  } else {
+    // File exists - remove from cache if it was there
+    emptyFileCache.delete(path);
+  }
+  
+  return content;
+}
+
 /**
  * Fetch and parse runtime subagent files from OpenClaw workspace
  * @param {object} options - Query options
@@ -31,16 +60,17 @@ function parseJsonl(content) {
 async function fetchRuntimeSubagents({ taskId } = {}) {
   // Read all runtime files (fail gracefully if missing)
   // Rethrow SERVICE_NOT_CONFIGURED so we return 503 instead of empty data
+  // Use cached file fetcher to reduce load when files are missing
   const wrapCatch = (p) => p.catch((err) => {
     if (err.code === 'SERVICE_NOT_CONFIGURED') throw err;
     return null;
   });
   
   const [spawnActiveContent, spawnRequestsContent, resultsCacheContent, activityLogContent] = await Promise.all([
-    wrapCatch(getFileContent('/runtime/mosbot/spawn-active.jsonl')),
-    wrapCatch(getFileContent('/runtime/mosbot/spawn-requests.json')),
-    wrapCatch(getFileContent('/runtime/mosbot/results-cache.jsonl')),
-    wrapCatch(getFileContent('/runtime/mosbot/activity-log.jsonl'))
+    wrapCatch(getCachedFileContent('/runtime/mosbot/spawn-active.jsonl')),
+    wrapCatch(getCachedFileContent('/runtime/mosbot/spawn-requests.json')),
+    wrapCatch(getCachedFileContent('/runtime/mosbot/results-cache.jsonl')),
+    wrapCatch(getCachedFileContent('/runtime/mosbot/activity-log.jsonl'))
   ]);
   
   // Parse running subagents from spawn-active.jsonl

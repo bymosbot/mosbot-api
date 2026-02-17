@@ -49,6 +49,23 @@ function normalizeAndValidateWorkspacePath(inputPath) {
   return normalized;
 }
 
+/**
+ * Normalize a timestamp from OpenClaw to milliseconds.
+ * OpenClaw may return: ms number, seconds number, or ISO string.
+ */
+function toUpdatedAtMs(val) {
+  if (val == null || val === '') return 0;
+  if (typeof val === 'number') {
+    // Values < 1e12 are likely Unix seconds
+    return val < 1e12 ? val * 1000 : val;
+  }
+  if (typeof val === 'string') {
+    const parsed = new Date(val).getTime();
+    return Number.isNaN(parsed) ? 0 : parsed;
+  }
+  return 0;
+}
+
 // GET /api/v1/openclaw/workspace/files
 // List workspace files (all authenticated users can view metadata)
 router.get('/workspace/files', requireAuth, async (req, res, next) => {
@@ -131,6 +148,26 @@ router.post('/workspace/files', requireAuth, requireAdmin, async (req, res, next
 
     const workspacePath = normalizeAndValidateWorkspacePath(inputPath);
     
+    // Restrict system config files to admin/owner only (exclude 'agent' role)
+    const isSystemConfigFile = workspacePath === '/openclaw.json' || workspacePath === '/org-chart.json';
+    if (isSystemConfigFile && req.user.role === 'agent') {
+      logger.warn('Agent role blocked from modifying system config', {
+        userId: req.user.id,
+        userEmail: req.user.email,
+        userRole: req.user.role,
+        path: workspacePath,
+        action: 'create_file_rejected'
+      });
+      
+      return res.status(403).json({
+        error: {
+          message: 'System configuration files can only be modified by admin or owner roles',
+          status: 403,
+          code: 'INSUFFICIENT_PERMISSIONS'
+        }
+      });
+    }
+    
     // Check if file already exists before creating
     try {
       await makeOpenClawRequest('GET', `/files/content?path=${encodeURIComponent(workspacePath)}`);
@@ -204,6 +241,26 @@ router.put('/workspace/files', requireAuth, requireAdmin, async (req, res, next)
 
     const workspacePath = normalizeAndValidateWorkspacePath(inputPath);
     
+    // Restrict system config files to admin/owner only (exclude 'agent' role)
+    const isSystemConfigFile = workspacePath === '/openclaw.json' || workspacePath === '/org-chart.json';
+    if (isSystemConfigFile && req.user.role === 'agent') {
+      logger.warn('Agent role blocked from modifying system config', {
+        userId: req.user.id,
+        userEmail: req.user.email,
+        userRole: req.user.role,
+        path: workspacePath,
+        action: 'update_file_rejected'
+      });
+      
+      return res.status(403).json({
+        error: {
+          message: 'System configuration files can only be modified by admin or owner roles',
+          status: 403,
+          code: 'INSUFFICIENT_PERMISSIONS'
+        }
+      });
+    }
+    
     logger.info('Updating OpenClaw workspace file', { 
       userId: req.user.id, 
       path: workspacePath,
@@ -235,6 +292,26 @@ router.delete('/workspace/files', requireAuth, requireAdmin, async (req, res, ne
     }
 
     const workspacePath = normalizeAndValidateWorkspacePath(inputPath);
+    
+    // Restrict system config files to admin/owner only (exclude 'agent' role)
+    const isSystemConfigFile = workspacePath === '/openclaw.json' || workspacePath === '/org-chart.json';
+    if (isSystemConfigFile && req.user.role === 'agent') {
+      logger.warn('Agent role blocked from deleting system config', {
+        userId: req.user.id,
+        userEmail: req.user.email,
+        userRole: req.user.role,
+        path: workspacePath,
+        action: 'delete_file_rejected'
+      });
+      
+      return res.status(403).json({
+        error: {
+          message: 'System configuration files can only be deleted by admin or owner roles',
+          status: 403,
+          code: 'INSUFFICIENT_PERMISSIONS'
+        }
+      });
+    }
     
     logger.info('Deleting OpenClaw workspace file', { 
       userId: req.user.id, 
@@ -549,6 +626,279 @@ router.get('/org-chart', requireAuth, async (req, res, next) => {
   }
 });
 
+// PUT /api/v1/openclaw/org-chart/agents/:agentId
+// Update an existing agent's org chart + OpenClaw config (admin/owner only)
+// The API handles syncing changes to both org-chart.json and openclaw.json internally.
+router.put('/org-chart/agents/:agentId', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { agentId } = req.params;
+    const agentData = req.body;
+
+    if (req.user.role === 'agent') {
+      return res.status(403).json({
+        error: { message: 'System configuration files can only be modified by admin or owner roles', status: 403, code: 'INSUFFICIENT_PERMISSIONS' }
+      });
+    }
+
+    logger.info('Updating agent config', { userId: req.user.id, agentId });
+
+    // Validate required fields
+    if (!agentData.title || !agentData.displayName) {
+      return res.status(400).json({
+        error: { message: 'title and displayName are required', status: 400 }
+      });
+    }
+
+    // Load current configs
+    let orgChart;
+    try {
+      const orgChartData = await makeOpenClawRequest('GET', '/files/content?path=/org-chart.json');
+      orgChart = JSON.parse(orgChartData.content);
+    } catch (err) {
+      if (err.status === 404) {
+        orgChart = { version: 1, leadership: [], departments: [], subagents: [] };
+      } else {
+        throw err;
+      }
+    }
+
+    const openclawData = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+    const openclawConfig = JSON.parse(openclawData.content);
+
+    // --- Update org-chart.json leadership ---
+    let leadership = orgChart.leadership || [];
+    const leadershipIndex = leadership.findIndex(l => l.id === agentId);
+
+    if (leadershipIndex < 0) {
+      return res.status(404).json({
+        error: { message: `Agent "${agentId}" not found in org chart`, status: 404, code: 'AGENT_NOT_FOUND' }
+      });
+    }
+
+    // Update only the fields the form manages
+    leadership[leadershipIndex] = {
+      ...leadership[leadershipIndex],
+      title: agentData.title,
+      label: agentData.label || leadership[leadershipIndex].label,
+      displayName: agentData.displayName,
+      description: agentData.description || '',
+      status: agentData.status || leadership[leadershipIndex].status,
+      reportsTo: agentData.reportsTo || null,
+    };
+    orgChart.leadership = leadership;
+
+    // --- Update openclaw.json agents.list (non-human only) ---
+    const isHuman = (agentData.status || leadership[leadershipIndex].status) === 'human';
+    if (!isHuman) {
+      const agentsList = openclawConfig.agents?.list || [];
+      const agentIndex = agentsList.findIndex(a => a.id === agentId);
+
+      if (agentIndex >= 0) {
+        const existing = agentsList[agentIndex];
+
+        // Merge identity
+        if (agentData.identityName || agentData.identityTheme || agentData.identityEmoji) {
+          existing.identity = {
+            ...(existing.identity || {}),
+            ...(agentData.identityName && { name: agentData.identityName }),
+            ...(agentData.identityTheme !== undefined && { theme: agentData.identityTheme }),
+            ...(agentData.identityEmoji && { emoji: agentData.identityEmoji }),
+          };
+        }
+
+        // Merge workspace
+        if (agentData.workspace) {
+          existing.workspace = agentData.workspace;
+        }
+
+        // Merge model
+        if (agentData.modelPrimary) {
+          existing.model = {
+            ...(existing.model || {}),
+            primary: agentData.modelPrimary,
+          };
+          const fallbacks = [agentData.modelFallback1, agentData.modelFallback2].filter(Boolean);
+          existing.model.fallbacks = fallbacks;
+        }
+
+        // Remove orgChart key if present (not recognized by OpenClaw schema)
+        delete existing.orgChart;
+
+        // Heartbeat
+        if (agentData.heartbeatEnabled === true) {
+          existing.heartbeat = {
+            ...(existing.heartbeat || {}),
+            every: agentData.heartbeatEvery || existing.heartbeat?.every || '60m',
+            model: agentData.heartbeatModel || existing.heartbeat?.model,
+            session: existing.heartbeat?.session || 'main',
+            target: existing.heartbeat?.target || 'last',
+            prompt: existing.heartbeat?.prompt || undefined,
+            ackMaxChars: existing.heartbeat?.ackMaxChars || 200,
+          };
+        } else if (agentData.heartbeatEnabled === false) {
+          delete existing.heartbeat;
+        }
+
+        if (!openclawConfig.agents) openclawConfig.agents = {};
+        openclawConfig.agents.list = agentsList;
+      }
+      // If agent doesn't exist in openclaw config, that's OK -- it stays as-is
+    }
+
+    // --- Clean up any stale orgChart keys from all agents (schema hygiene) ---
+    const allAgents = openclawConfig.agents?.list || [];
+    for (const agent of allAgents) {
+      delete agent.orgChart;
+    }
+
+    // --- Write both files ---
+    const orgChartContent = JSON.stringify(orgChart, null, 2) + '\n';
+    const openclawContent = JSON.stringify(openclawConfig, null, 2) + '\n';
+
+    await Promise.all([
+      makeOpenClawRequest('PUT', '/files', { path: '/org-chart.json', content: orgChartContent, encoding: 'utf8' }),
+      makeOpenClawRequest('PUT', '/files', { path: '/openclaw.json', content: openclawContent, encoding: 'utf8' }),
+    ]);
+
+    logger.info('Agent config updated successfully', {
+      userId: req.user.id,
+      agentId,
+      orgChartSize: orgChartContent.length,
+      openclawSize: openclawContent.length,
+    });
+
+    res.json({
+      data: {
+        agentId,
+        message: 'Agent updated successfully',
+        updatedFiles: ['/org-chart.json', '/openclaw.json'],
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/v1/openclaw/org-chart/agents
+// Create a new agent in the org chart + OpenClaw config (admin/owner only)
+router.post('/org-chart/agents', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const agentData = req.body;
+
+    if (req.user.role === 'agent') {
+      return res.status(403).json({
+        error: { message: 'System configuration files can only be modified by admin or owner roles', status: 403, code: 'INSUFFICIENT_PERMISSIONS' }
+      });
+    }
+
+    // Validate required fields
+    if (!agentData.id || !agentData.title || !agentData.displayName) {
+      return res.status(400).json({
+        error: { message: 'id, title, and displayName are required', status: 400 }
+      });
+    }
+
+    logger.info('Creating agent', { userId: req.user.id, agentId: agentData.id });
+
+    // Load current configs
+    let orgChart;
+    try {
+      const orgChartData = await makeOpenClawRequest('GET', '/files/content?path=/org-chart.json');
+      orgChart = JSON.parse(orgChartData.content);
+    } catch (err) {
+      if (err.status === 404) {
+        orgChart = { version: 1, leadership: [], departments: [], subagents: [] };
+      } else {
+        throw err;
+      }
+    }
+
+    const openclawData = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+    const openclawConfig = JSON.parse(openclawData.content);
+
+    // Check for duplicates
+    const leadership = orgChart.leadership || [];
+    if (leadership.some(l => l.id === agentData.id)) {
+      return res.status(409).json({
+        error: { message: `Agent "${agentData.id}" already exists in org chart`, status: 409, code: 'AGENT_EXISTS' }
+      });
+    }
+
+    // --- Add to org-chart.json leadership ---
+    leadership.push({
+      id: agentData.id,
+      title: agentData.title,
+      label: agentData.label || `mosbot-${agentData.id}`,
+      displayName: agentData.displayName,
+      description: agentData.description || '',
+      status: agentData.status || 'scaffolded',
+      reportsTo: agentData.reportsTo || null,
+    });
+    orgChart.leadership = leadership;
+
+    // --- Add to openclaw.json agents.list (non-human only) ---
+    const isHuman = agentData.status === 'human';
+    if (!isHuman) {
+      if (!openclawConfig.agents) openclawConfig.agents = {};
+      if (!Array.isArray(openclawConfig.agents.list)) openclawConfig.agents.list = [];
+
+      const fallbacks = [agentData.modelFallback1, agentData.modelFallback2].filter(Boolean);
+
+      const newAgent = {
+        id: agentData.id,
+        workspace: agentData.workspace || `/home/node/.openclaw/workspace-${agentData.id}`,
+        identity: {
+          name: agentData.identityName || agentData.displayName,
+          theme: agentData.identityTheme || agentData.description || '',
+          emoji: agentData.identityEmoji || '🤖',
+        },
+        model: {
+          primary: agentData.modelPrimary || 'openrouter/anthropic/claude-sonnet-4.5',
+          fallbacks,
+        },
+      };
+
+      if (agentData.heartbeatEnabled) {
+        newAgent.heartbeat = {
+          every: agentData.heartbeatEvery || '60m',
+          model: agentData.heartbeatModel,
+          session: 'main',
+          target: 'last',
+          ackMaxChars: 200,
+        };
+      }
+
+      openclawConfig.agents.list.push(newAgent);
+    }
+
+    // --- Write both files ---
+    const orgChartContent = JSON.stringify(orgChart, null, 2) + '\n';
+    const openclawContent = JSON.stringify(openclawConfig, null, 2) + '\n';
+
+    await Promise.all([
+      makeOpenClawRequest('PUT', '/files', { path: '/org-chart.json', content: orgChartContent, encoding: 'utf8' }),
+      makeOpenClawRequest('PUT', '/files', { path: '/openclaw.json', content: openclawContent, encoding: 'utf8' }),
+    ]);
+
+    logger.info('Agent created successfully', {
+      userId: req.user.id,
+      agentId: agentData.id,
+      orgChartSize: orgChartContent.length,
+      openclawSize: openclawContent.length,
+    });
+
+    res.status(201).json({
+      data: {
+        agentId: agentData.id,
+        message: 'Agent created successfully',
+        updatedFiles: ['/org-chart.json', '/openclaw.json'],
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/v1/openclaw/subagents
 // Get running, queued, and completed subagents from OpenClaw workspace runtime files
 router.get('/subagents', requireAuth, async (req, res, next) => {
@@ -674,7 +1024,9 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
       }
       
       // Determine status based on updatedAt timestamp
-      const updatedAtMs = session.updatedAt || 0;
+      // Support updatedAt (camelCase) or updated_at (snake_case) from OpenClaw
+      const rawUpdatedAt = session.updatedAt ?? session.updated_at;
+      const updatedAtMs = toUpdatedAtMs(rawUpdatedAt);
       const timeSinceUpdate = now - updatedAtMs;
       let status;
       if (timeSinceUpdate <= RUNNING_THRESHOLD_MS) {
@@ -748,7 +1100,7 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
         label: session.displayName || session.sessionLabel || session.sessionId || session.id,
         status,
         kind: session.kind || 'main',
-        updatedAt: session.updatedAt || null,
+        updatedAt: updatedAtMs || null,
         agent: agentName,
         model,
         // Token usage
@@ -955,7 +1307,8 @@ router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) 
       const RUNNING_THRESHOLD_MS = 2 * 60 * 1000;  // 2 minutes
       const ACTIVE_THRESHOLD_MS = 30 * 60 * 1000;  // 30 minutes
       const now = Date.now();
-      const updatedAtMs = session.updatedAt || 0;
+      const rawUpdatedAt = session.updatedAt ?? session.updated_at;
+      const updatedAtMs = toUpdatedAtMs(rawUpdatedAt);
       const timeSinceUpdate = now - updatedAtMs;
       let status;
       if (timeSinceUpdate <= RUNNING_THRESHOLD_MS) {
@@ -973,7 +1326,7 @@ router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) 
         agent: agentName,
         status,
         kind: session.kind || 'main',
-        updatedAt: session.updatedAt || null,
+        updatedAt: updatedAtMs || null,
         contextTokens: session.contextTokens || 0,
         totalTokensUsed: session.totalTokens || 0,
         contextUsagePercent: session.contextTokens > 0 
@@ -1322,7 +1675,7 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
 
       if (agentCronSessions.length > 0 && jobLastRunMs) {
         agentCronSessions.forEach(session => {
-          const sessionUpdatedAt = session.updatedAt || 0;
+          const sessionUpdatedAt = toUpdatedAtMs(session.updatedAt ?? session.updated_at);
           const delta = Math.abs(sessionUpdatedAt - jobLastRunMs);
           // Allow up to 5 minute drift for matching
           if (delta < 5 * 60 * 1000 && delta < bestMatchDelta) {
@@ -1377,7 +1730,7 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
             messageCost,
             model: actualModel,
             lastMessage: lastMessageText,
-            updatedAt: bestMatch.updatedAt,
+            updatedAt: toUpdatedAtMs(bestMatch.updatedAt ?? bestMatch.updated_at) || null,
             contextTokens,
             totalTokensUsed,
             contextUsagePercent,

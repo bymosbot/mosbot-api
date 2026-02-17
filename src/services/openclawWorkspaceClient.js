@@ -142,7 +142,12 @@ async function makeOpenClawRequest(method, path, body = null, retryCount = 0) {
     
     // Re-throw if already has status code
     if (error.status) {
-      logger.error('OpenClaw workspace request failed', { method, path, error: error.message, status: error.status, retryCount });
+      // 404 is expected for optional/missing files (e.g. runtime subagent files); avoid ERROR noise
+      if (error.status === 404) {
+        logger.debug('OpenClaw workspace file not found', { method, path, status: 404 });
+      } else {
+        logger.error('OpenClaw workspace request failed', { method, path, error: error.message, status: error.status, retryCount });
+      }
       throw error;
     }
     

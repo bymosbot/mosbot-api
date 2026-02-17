@@ -262,7 +262,9 @@ async function sessionsHistory({ sessionKey, limit, includeTools } = {}) {
   if (includeTools != null) args.includeTools = includeTools;
   
   try {
-    const result = await invokeTool('sessions_history', args);
+    // Pass sessionKey as the invocation context so the Gateway sees the request
+    // as coming from the target agent's own session (avoids cross-agent access check)
+    const result = await invokeTool('sessions_history', args, { sessionKey });
     
     // Log detailed information about the result for debugging
     logger.info('sessions_history tool result', {
