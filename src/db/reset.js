@@ -115,6 +115,9 @@ async function reset() {
     logger.info('Resetting database...');
 
     // Drop all tables in correct order (respecting foreign key constraints)
+    await client.query('DROP TABLE IF EXISTS standup_messages CASCADE');
+    await client.query('DROP TABLE IF EXISTS standup_entries CASCADE');
+    await client.query('DROP TABLE IF EXISTS standups CASCADE');
     await client.query('DROP TABLE IF EXISTS task_logs CASCADE');
     await client.query('DROP TABLE IF EXISTS tasks CASCADE');
     await client.query('DROP TABLE IF EXISTS activity_logs CASCADE');
@@ -122,6 +125,7 @@ async function reset() {
     await client.query('DROP TABLE IF EXISTS schema_migrations CASCADE');
 
     // Drop functions
+    await client.query('DROP FUNCTION IF EXISTS update_standups_updated_at() CASCADE');
     await client.query('DROP FUNCTION IF EXISTS update_updated_at() CASCADE');
     await client.query(
       'DROP FUNCTION IF EXISTS validate_tags_length(TEXT[]) CASCADE'

@@ -75,6 +75,7 @@ app.use('/api/v1/admin/users', require('./routes/admin/users'));
 app.use('/api/v1/admin/models', require('./routes/admin/models'));
 app.use('/api/v1/openclaw', require('./routes/openclaw'));
 app.use('/api/v1/models', require('./routes/models'));
+app.use('/api/v1/standups', require('./routes/standups'));
 
 // Error handling middleware
 app.use((err, req, res, _next) => {
@@ -164,6 +165,40 @@ async function start() {
       }
     } else {
       logger.info('Subagent retention purge scheduler disabled');
+    }
+
+    // Start daily standup scheduler
+    const ENABLE_DAILY_STANDUP = process.env.ENABLE_DAILY_STANDUP !== 'false'; // Default: enabled
+    const STANDUP_CRON = process.env.STANDUP_CRON || '0 8 * * *'; // Default: 8 AM daily
+    
+    if (ENABLE_DAILY_STANDUP) {
+      const runDailyStandup = require('./jobs/runDailyStandup');
+      
+      logger.info('Daily standup scheduler enabled', {
+        cron: STANDUP_CRON,
+        timezone: TIMEZONE,
+      });
+      
+      cron.schedule(STANDUP_CRON, async () => {
+        logger.info('Running scheduled daily standup job');
+        try {
+          await runDailyStandup();
+        } catch (error) {
+          logger.error('Daily standup job error', { error: error.message });
+        }
+      }, {
+        timezone: TIMEZONE,
+      });
+      
+      // Optional: Run once on startup for testing
+      if (process.env.STANDUP_ON_STARTUP === 'true') {
+        logger.info('Running daily standup on startup');
+        runDailyStandup().catch((err) => {
+          logger.error('Startup daily standup failed', { error: err.message });
+        });
+      }
+    } else {
+      logger.info('Daily standup scheduler disabled');
     }
   });
 }
