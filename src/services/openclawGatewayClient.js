@@ -134,7 +134,9 @@ async function makeOpenClawGatewayRequest(path, body = null, retryCount = 0) {
     
     // Re-throw if already has status code
     if (error.status) {
-      logger.error('OpenClaw gateway request failed', { path, error: error.message, status: error.status, retryCount });
+      // 401 is handled by callers (e.g. invokeTool) — log at debug to avoid double-logging
+      const logLevel = error.status === 401 ? 'debug' : 'error';
+      logger[logLevel]('OpenClaw gateway request failed', { path, error: error.message, status: error.status, retryCount });
       throw error;
     }
     
@@ -177,9 +179,18 @@ async function invokeTool(tool, args = {}, options = {}) {
     
     return response.result || response;
   } catch (error) {
-    // Return null for 404 (tool not available), throw for other errors
-    if (error.status === 404 || error.code === 'OPENCLAW_GATEWAY_ERROR') {
+    // Return null for 404 (tool not available) — the tool genuinely doesn't exist
+    if (error.status === 404) {
       logger.warn('Tool not available', { tool, error: error.message });
+      return null;
+    }
+    // Surface auth errors clearly instead of masking them as "tool not available"
+    if (error.status === 401) {
+      logger.warn('OpenClaw gateway auth failed for tool invocation', {
+        tool,
+        sessionKey,
+        status: error.status
+      });
       return null;
     }
     throw error;
