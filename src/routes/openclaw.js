@@ -609,9 +609,13 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
       });
     }
     
-    // Query sessions from each agent using the full agent session key format
+    // Query sessions from each agent using the full agent session key format.
     // The sessionKey in /tools/invoke must be the full key (e.g., "agent:coo:main")
-    // to run the tool in that agent's context and see that agent's session store
+    // to run the tool in that agent's context and see that agent's session store.
+    // We request ALL session kinds (main, cron, hook, group, node, other) so that
+    // cron-triggered sessions and hook sessions are included alongside regular ones.
+    const ALL_SESSION_KINDS = ['main', 'group', 'cron', 'hook', 'node', 'other'];
+    
     const sessionPromises = agentIds.map(agentId => {
       // Use the full session key format: "agent:<agentId>:main" for non-main agents
       // For the "main" agent, just use "main" (the default)
@@ -619,6 +623,7 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
       
       return sessionsList({
         sessionKey,
+        kinds: ALL_SESSION_KINDS,
         limit: 500,
         messageLimit: 1 // Include last message per session
       }).then(sessions => sessions)
@@ -1123,8 +1128,12 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
 
     // Normalize gateway jobs: map common OpenClaw field names to our schema
     // and compute nextRunAt from cron expressions / intervals when missing
-    let cronParser = null;
-    try { cronParser = require('cron-parser'); } catch (_) { /* optional dependency */ }
+    let CronExpressionParser = null;
+    try { 
+      CronExpressionParser = require('cron-parser').CronExpressionParser; 
+    } catch (_) { 
+      /* optional dependency */ 
+    }
 
     if (gatewayJobs.length > 0) {
       logger.info('Raw gateway job sample (first job keys)', {
@@ -1176,10 +1185,10 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
       if (!normalized.nextRunAt) {
         try {
           const sched = normalized.schedule || {};
-          if (sched.kind === 'cron' && sched.expr && cronParser) {
+          if (sched.kind === 'cron' && sched.expr && CronExpressionParser) {
             const options = {};
-            if (sched.tz) options.tz = sched.tz;
-            const interval = cronParser.parseExpression(sched.expr, options);
+            options.tz = sched.tz || process.env.TIMEZONE || 'UTC';
+            const interval = CronExpressionParser.parse(sched.expr, options);
             normalized.nextRunAt = interval.next().toISOString();
           } else if (sched.kind === 'every' && sched.everyMs && normalized.lastRunAt) {
             normalized.nextRunAt = new Date(
@@ -1197,6 +1206,17 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
       // Also normalize status from state object for badge display
       if (!normalized.status && job.state?.lastStatus) {
         normalized.status = job.state.lastStatus;
+      }
+
+      // Ensure payload.message is always set for dashboard display
+      // (official format uses payload.text for systemEvent, payload.message for agentTurn)
+      if (normalized.payload) {
+        if (!normalized.payload.message && normalized.payload.text) {
+          normalized.payload.message = normalized.payload.text;
+        }
+        if (!normalized.payload.message && normalized.payload.prompt) {
+          normalized.payload.message = normalized.payload.prompt;
+        }
       }
 
       return normalized;
@@ -1217,14 +1237,185 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
       return job;
     });
 
+    // Query cron sessions from OpenClaw to get actual execution data
+    // (tokens, cost, model used, last message) instead of proxying from agent main sessions
+    const { sessionsList } = require('../services/openclawGatewayClient');
+    
+    // Get unique agent IDs that have cron jobs (not heartbeat jobs, which use main sessions)
+    const cronJobAgentIds = [...new Set(
+      enrichedJobs
+        .filter(j => j.source === 'gateway')
+        .map(j => j.agentId)
+        .filter(Boolean)
+    )];
+
+    // Query ALL sessions for each agent, then filter to cron kind in-memory
+    // OpenClaw's sessions_list with kinds: ['cron'] returns empty, but querying all
+    // sessions may include cron sessions tagged with kind: 'cron'
+    let cronSessionsByAgent = new Map();
+    if (cronJobAgentIds.length > 0) {
+      try {
+        const cronSessionPromises = cronJobAgentIds.map(async agentId => {
+          const sessionKey = agentId === 'main' ? 'main' : `agent:${agentId}:main`;
+          try {
+            const allSessions = await sessionsList({
+              sessionKey,
+              // Don't filter by kinds — get all sessions and filter in-memory
+              limit: 500,
+              messageLimit: 1 // Include last message for usage data
+            });
+            // Filter to cron sessions (kind === 'cron' or key contains ':cron:')
+            const cronSessions = allSessions.filter(s => 
+              s.kind === 'cron' || (s.key && s.key.includes(':cron:'))
+            );
+            return { agentId, sessions: cronSessions };
+          } catch (err) {
+            logger.warn('Failed to fetch sessions for cron matching', { agentId, error: err.message });
+            return { agentId, sessions: [] };
+          }
+        });
+
+        const cronSessionResults = await Promise.all(cronSessionPromises);
+        cronSessionResults.forEach(({ agentId, sessions }) => {
+          cronSessionsByAgent.set(agentId, sessions);
+        });
+
+        const totalCronSessions = Array.from(cronSessionsByAgent.values()).flat().length;
+        logger.info('Cron sessions fetched', {
+          agentCount: cronJobAgentIds.length,
+          totalSessions: totalCronSessions
+        });
+
+        // Log sample cron session if found
+        if (totalCronSessions > 0) {
+          const firstCronSession = Array.from(cronSessionsByAgent.values()).flat()[0];
+          logger.info('Sample cron session', {
+            key: firstCronSession.key,
+            kind: firstCronSession.kind,
+            updatedAt: firstCronSession.updatedAt,
+            hasMessages: (firstCronSession.messages || []).length > 0
+          });
+        }
+      } catch (cronSessionErr) {
+        logger.warn('Failed to query sessions for cron matching, execution data will be unavailable', {
+          error: cronSessionErr.message
+        });
+      }
+    }
+
+    // Merge execution data from cron sessions into each cron job
+    // Note: OpenClaw runs cron jobs in isolated sessions that are not exposed via sessions_list,
+    // so we provide basic state data from jobs.json and null for detailed metrics.
+    const jobsWithExecutionData = enrichedJobs.map(job => {
+      // Only enrich gateway cron jobs; heartbeats use main sessions
+      if (job.source !== 'gateway' || !job.agentId) {
+        return job;
+      }
+
+      const agentCronSessions = cronSessionsByAgent.get(job.agentId) || [];
+      const jobLastRunMs = job.state?.lastRunAtMs;
+      
+      // Attempt to match a cron session by timestamp proximity (may be empty)
+      let bestMatch = null;
+      let bestMatchDelta = Infinity;
+
+      if (agentCronSessions.length > 0 && jobLastRunMs) {
+        agentCronSessions.forEach(session => {
+          const sessionUpdatedAt = session.updatedAt || 0;
+          const delta = Math.abs(sessionUpdatedAt - jobLastRunMs);
+          // Allow up to 5 minute drift for matching
+          if (delta < 5 * 60 * 1000 && delta < bestMatchDelta) {
+            bestMatch = session;
+            bestMatchDelta = delta;
+          }
+        });
+      }
+
+      if (bestMatch) {
+        // Extract execution data from the matched session
+        const lastMessage = bestMatch.messages?.[0] || null;
+        const usage = lastMessage?.usage || {};
+        const inputTokens = (usage.input || 0) + (usage.cacheRead || 0);
+        const outputTokens = usage.output || 0;
+        const messageCost = usage.cost?.total || 0;
+
+        // Extract model from message
+        let actualModel = null;
+        if (lastMessage?.provider && lastMessage?.model) {
+          actualModel = `${lastMessage.provider}/${lastMessage.model}`;
+        } else if (lastMessage?.model) {
+          actualModel = lastMessage.model;
+        }
+
+        // Extract last message text
+        let lastMessageText = null;
+        if (lastMessage?.content) {
+          if (typeof lastMessage.content === 'string') {
+            lastMessageText = lastMessage.content;
+          } else if (Array.isArray(lastMessage.content)) {
+            const textBlock = lastMessage.content.find(c => c.type === 'text');
+            lastMessageText = textBlock?.text || null;
+          }
+        }
+        if (lastMessageText && lastMessageText.length > 200) {
+          lastMessageText = lastMessageText.substring(0, 200) + '...';
+        }
+
+        // Context window
+        const contextTokens = bestMatch.contextTokens || 0;
+        const totalTokensUsed = bestMatch.totalTokens || 0;
+        const contextUsagePercent = contextTokens > 0 
+          ? Math.round((totalTokensUsed / contextTokens) * 100 * 10) / 10 
+          : 0;
+
+        return {
+          ...job,
+          lastExecution: {
+            inputTokens,
+            outputTokens,
+            messageCost,
+            model: actualModel,
+            lastMessage: lastMessageText,
+            updatedAt: bestMatch.updatedAt,
+            contextTokens,
+            totalTokensUsed,
+            contextUsagePercent,
+            sessionKey: bestMatch.key || null,
+          }
+        };
+      }
+
+      // No session match found — provide basic state data from jobs.json
+      // Include a flag indicating that detailed metrics are unavailable
+      return {
+        ...job,
+        lastExecution: {
+          inputTokens: null,
+          outputTokens: null,
+          messageCost: null,
+          model: null,
+          lastMessage: null,
+          updatedAt: jobLastRunMs || null,
+          contextTokens: null,
+          totalTokensUsed: null,
+          contextUsagePercent: null,
+          sessionKey: null,
+          durationMs: job.state?.lastDurationMs || null,
+          status: job.state?.lastStatus || null,
+          unavailable: true, // Flag indicating session data is not accessible
+        }
+      };
+    });
+
     logger.info('Cron jobs aggregated', {
       userId: req.user.id,
       gateway: taggedGatewayJobs.length,
       heartbeats: heartbeatJobs.length,
-      total: enrichedJobs.length,
+      total: jobsWithExecutionData.length,
+      withExecutionData: jobsWithExecutionData.filter(j => j.lastExecution).length,
     });
 
-    res.json({ data: enrichedJobs });
+    res.json({ data: jobsWithExecutionData });
   } catch (error) {
     if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
       logger.warn('OpenClaw not available for cron jobs, returning empty array', {
@@ -1330,6 +1521,31 @@ router.patch('/cron-jobs/:jobId/enabled', requireAuth, requireAdmin, async (req,
     const job = await setCronJobEnabled(jobId, enabled);
     
     res.json({ data: job });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/v1/openclaw/cron-jobs/:jobId/trigger
+// Manually trigger a cron job to run now (admin only)
+router.post('/cron-jobs/:jobId/trigger', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { triggerCronJob } = require('../services/cronJobsService');
+    const { jobId } = req.params;
+
+    logger.info('Manual cron job trigger requested', {
+      userId: req.user.id,
+      jobId,
+    });
+
+    const job = await triggerCronJob(jobId);
+
+    res.json({
+      data: job,
+      meta: {
+        message: 'Trigger requested. The job will fire within the next 60 seconds.',
+      },
+    });
   } catch (error) {
     next(error);
   }

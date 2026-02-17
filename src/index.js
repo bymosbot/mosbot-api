@@ -30,6 +30,9 @@ if (ARCHIVE_AFTER_DAYS_RAW !== ARCHIVE_AFTER_DAYS) {
   );
 }
 
+// Instance timezone — single source of truth for all time-related operations
+const TIMEZONE = process.env.TIMEZONE || 'UTC';
+
 // Subagent retention purge configuration
 const ENABLE_SUBAGENT_RETENTION_PURGE = process.env.ENABLE_SUBAGENT_RETENTION_PURGE !== 'false'; // Default: enabled
 const SUBAGENT_RETENTION_CRON = process.env.SUBAGENT_RETENTION_CRON || '0 3 * * *'; // Default: 3 AM daily
@@ -52,6 +55,15 @@ app.use(express.urlencoded({ extended: true }));
 // Health check endpoint
 app.get('/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
+
+// Public config endpoint — exposes non-sensitive instance settings to the dashboard
+app.get('/api/v1/config', (req, res) => {
+  res.json({
+    data: {
+      timezone: TIMEZONE,
+    },
+  });
 });
 
 // API routes
@@ -140,7 +152,7 @@ async function start() {
           logger.error('Subagent retention purge job error', { error: error.message });
         }
       }, {
-        timezone: 'Asia/Singapore'
+        timezone: TIMEZONE,
       });
 
       // Optional: Run once on startup for testing/immediate purge

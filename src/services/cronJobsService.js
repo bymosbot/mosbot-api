@@ -5,6 +5,130 @@ const { getFileContent, putFileContent } = require('./openclawWorkspaceClient');
 const CRON_JOBS_PATH = '/cron/jobs.json';
 
 /**
+ * Compute the next run timestamp (ms) for a cron job based on its schedule.
+ * Returns null if the schedule cannot be parsed.
+ */
+function computeNextRunAtMs(job) {
+  const sched = job.schedule || {};
+  try {
+    if (sched.kind === 'cron' && sched.expr) {
+      const { CronExpressionParser } = require('cron-parser');
+      const options = {};
+      if (sched.tz) options.tz = sched.tz;
+      const interval = CronExpressionParser.parse(sched.expr, options);
+      return interval.next().getTime();
+    }
+    if (sched.kind === 'every' && sched.everyMs) {
+      return Date.now() + sched.everyMs;
+    }
+    if (sched.kind === 'at' && sched.at) {
+      return new Date(sched.at).getTime();
+    }
+  } catch (err) {
+    logger.warn('Failed to compute nextRunAtMs', { jobId: job.jobId, error: err.message });
+  }
+  return null;
+}
+
+/**
+ * Transform dashboard payload to official OpenClaw cron.add format.
+ *
+ * Official shape (from docs.openclaw.ai/cron-jobs):
+ *   Main session:
+ *     { name, schedule, sessionTarget: "main", wakeMode, payload: { kind: "systemEvent", text } }
+ *   Isolated session:
+ *     { name, schedule, sessionTarget: "isolated", wakeMode, payload: { kind: "agentTurn", message }, delivery }
+ *
+ * Dashboard sends:
+ *     { name, schedule, sessionTarget, payload: { message, model }, delivery, agentId, enabled, description }
+ */
+function toOfficialFormat(dashboardPayload) {
+  const official = {};
+
+  official.name = dashboardPayload.name;
+  if (dashboardPayload.description) {
+    official.description = dashboardPayload.description;
+  }
+
+  // Schedule — pass through (already uses { kind, expr/everyMs/at })
+  if (dashboardPayload.schedule) {
+    official.schedule = { ...dashboardPayload.schedule };
+    // Ensure cron schedules always carry a timezone so the Gateway
+    // interprets expressions in the instance's local time.
+    if (official.schedule.kind === 'cron' && !official.schedule.tz) {
+      official.schedule.tz = process.env.TIMEZONE || 'UTC';
+    }
+  }
+
+  // Session target
+  const sessionTarget = dashboardPayload.sessionTarget || 'main';
+  official.sessionTarget = sessionTarget;
+
+  // Wake mode — default to "now" (matches OpenClaw default)
+  official.wakeMode = dashboardPayload.wakeMode || 'now';
+
+  // Payload — transform based on session target
+  const srcPayload = dashboardPayload.payload || {};
+  const promptText = srcPayload.message || srcPayload.text || srcPayload.prompt || '';
+
+  if (sessionTarget === 'main') {
+    official.payload = {
+      kind: 'systemEvent',
+      text: promptText,
+    };
+  } else {
+    official.payload = {
+      kind: 'agentTurn',
+      message: promptText,
+    };
+  }
+
+  // Model override (only meaningful for isolated/agentTurn, but allowed on main too)
+  if (srcPayload.model) {
+    official.payload.model = srcPayload.model;
+  }
+
+  // Agent binding
+  if (dashboardPayload.agentId) {
+    official.agentId = dashboardPayload.agentId;
+  }
+
+  // Enabled state
+  if (dashboardPayload.enabled !== undefined) {
+    official.enabled = dashboardPayload.enabled;
+  }
+
+  // Delivery config (only for isolated sessions per docs, but pass through)
+  if (dashboardPayload.delivery && dashboardPayload.delivery.mode) {
+    official.delivery = { ...dashboardPayload.delivery };
+  }
+
+  return official;
+}
+
+/**
+ * Transform official OpenClaw cron job back to dashboard-friendly format.
+ * Ensures the dashboard can read payload.message regardless of payload.kind.
+ */
+function fromOfficialFormat(job) {
+  if (!job) return job;
+
+  const normalized = { ...job };
+
+  // Ensure payload.message is set for dashboard display
+  if (normalized.payload) {
+    if (!normalized.payload.message && normalized.payload.text) {
+      normalized.payload.message = normalized.payload.text;
+    }
+    if (!normalized.payload.message && normalized.payload.prompt) {
+      normalized.payload.message = normalized.payload.prompt;
+    }
+  }
+
+  return normalized;
+}
+
+/**
  * Read and parse cron jobs from OpenClaw workspace
  * @returns {Promise<Object>} Map of jobId -> job object
  */
@@ -12,15 +136,12 @@ async function readCronJobs() {
   try {
     const content = await getFileContent(CRON_JOBS_PATH);
     if (!content) {
-      // File doesn't exist yet, return empty map
       return {};
     }
 
     const parsed = JSON.parse(typeof content === 'string' ? content : content.content || content);
     
-    // Handle various shapes: array, { jobs: array }, { jobs: map }, map
     if (Array.isArray(parsed)) {
-      // Convert array to map
       const map = {};
       parsed.forEach(job => {
         const id = job.jobId || job.id || uuidv4();
@@ -31,7 +152,6 @@ async function readCronJobs() {
     
     if (parsed.jobs) {
       if (Array.isArray(parsed.jobs)) {
-        // { jobs: [...] }
         const map = {};
         parsed.jobs.forEach(job => {
           const id = job.jobId || job.id || uuidv4();
@@ -39,15 +159,12 @@ async function readCronJobs() {
         });
         return map;
       }
-      // { jobs: { id: job, ... } }
       return parsed.jobs;
     }
     
-    // Assume root is the map
     return parsed;
   } catch (error) {
     if (error.status === 404 || error.code === 'OPENCLAW_SERVICE_ERROR') {
-      // File doesn't exist, return empty
       return {};
     }
     throw error;
@@ -55,22 +172,27 @@ async function readCronJobs() {
 }
 
 /**
- * Write cron jobs map back to OpenClaw workspace
+ * Write cron jobs map back to OpenClaw workspace.
+ * 
+ * The OpenClaw Gateway expects { version: 1, jobs: [...] } (array format).
+ * Internally we use a map (jobId -> job) for easy lookups, so we convert
+ * back to an array before writing.
+ *
  * @param {Object} jobsMap - Map of jobId -> job object
  */
 async function writeCronJobs(jobsMap) {
+  const jobsArray = Object.values(jobsMap);
   const payload = {
-    jobs: jobsMap
+    version: 1,
+    jobs: jobsArray,
   };
   await putFileContent(CRON_JOBS_PATH, JSON.stringify(payload, null, 2));
   
-  // Best-effort: try to trigger scheduler reload
   try {
     const { invokeTool } = require('./openclawGatewayClient');
     await invokeTool('cron.reload', {});
     logger.info('Triggered cron.reload after jobs.json update');
   } catch (reloadErr) {
-    // Ignore if tool doesn't exist or fails
     logger.warn('cron.reload not available or failed (this is OK)', { 
       error: reloadErr.message 
     });
@@ -78,7 +200,7 @@ async function writeCronJobs(jobsMap) {
 }
 
 /**
- * Validate cron job payload
+ * Validate cron job payload (dashboard format)
  * @param {Object} job - Job payload to validate
  * @returns {Object} Validation result { valid: boolean, errors: string[] }
  */
@@ -93,7 +215,6 @@ function validateCronJob(job) {
     errors.push('name must be 200 characters or less');
   }
   
-  // Validate schedule
   if (!job.schedule || typeof job.schedule !== 'object') {
     errors.push('schedule is required and must be an object');
   } else {
@@ -106,7 +227,6 @@ function validateCronJob(job) {
       if (!job.schedule.expr || typeof job.schedule.expr !== 'string') {
         errors.push('schedule.expr is required for cron schedules');
       }
-      // Basic cron expression validation (5 or 6 fields)
       if (job.schedule.expr) {
         const parts = job.schedule.expr.trim().split(/\s+/);
         if (parts.length < 5 || parts.length > 6) {
@@ -128,17 +248,15 @@ function validateCronJob(job) {
     }
   }
   
-  // Validate sessionTarget (optional)
   if (job.sessionTarget && !['main', 'isolated'].includes(job.sessionTarget)) {
     errors.push('sessionTarget must be either "main" or "isolated"');
   }
   
-  // Validate delivery (optional)
   if (job.delivery) {
     if (typeof job.delivery !== 'object') {
       errors.push('delivery must be an object');
-    } else if (job.delivery.mode && !['announce', 'none'].includes(job.delivery.mode)) {
-      errors.push('delivery.mode must be either "announce" or "none"');
+    } else if (job.delivery.mode && !['announce', 'none', 'webhook'].includes(job.delivery.mode)) {
+      errors.push('delivery.mode must be one of: "announce", "none", "webhook"');
     }
   }
   
@@ -149,9 +267,10 @@ function validateCronJob(job) {
 }
 
 /**
- * Create a new cron job
- * @param {Object} payload - Job payload
- * @returns {Promise<Object>} Created job with jobId
+ * Create a new cron job via the Gateway cron.add tool.
+ * Falls back to direct file write if the Gateway tool is unavailable.
+ * @param {Object} payload - Dashboard-format job payload
+ * @returns {Promise<Object>} Created job
  */
 async function createCronJob(payload) {
   const validation = validateCronJob(payload);
@@ -162,13 +281,37 @@ async function createCronJob(payload) {
     err.errors = validation.errors;
     throw err;
   }
-  
+
+  const officialPayload = toOfficialFormat(payload);
+
+  // Try Gateway cron.add first
+  try {
+    const { invokeTool } = require('./openclawGatewayClient');
+    const result = await invokeTool('cron.add', officialPayload);
+    if (result) {
+      const job = result.job || result;
+      const jobId = job.jobId || job.id || uuidv4();
+      logger.info('Cron job created via Gateway cron.add', { jobId, name: payload.name });
+      return fromOfficialFormat({
+        ...job,
+        jobId,
+        id: jobId,
+        source: 'gateway',
+      });
+    }
+  } catch (gatewayErr) {
+    if (gatewayErr.code === 'SERVICE_NOT_CONFIGURED' || gatewayErr.code === 'SERVICE_UNAVAILABLE') {
+      throw gatewayErr;
+    }
+    logger.warn('Gateway cron.add failed, falling back to file write', {
+      error: gatewayErr.message,
+    });
+  }
+
+  // Fallback: write directly to jobs.json
   const jobs = await readCronJobs();
-  
-  // Generate jobId if not provided
   const jobId = payload.jobId || uuidv4();
-  
-  // Check for duplicate name
+
   const existingNames = Object.values(jobs).map(j => j.name);
   if (existingNames.includes(payload.name)) {
     const err = new Error(`A cron job with name "${payload.name}" already exists`);
@@ -176,62 +319,100 @@ async function createCronJob(payload) {
     err.code = 'DUPLICATE_NAME';
     throw err;
   }
-  
+
   const newJob = {
-    ...payload,
+    ...officialPayload,
     jobId,
     id: jobId,
     source: 'gateway',
-    enabled: payload.enabled !== false, // Default to enabled
+    enabled: payload.enabled !== false,
     createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString()
+    updatedAt: new Date().toISOString(),
   };
-  
+
+  // Compute state.nextRunAtMs so the Gateway can arm the timer
+  if (newJob.enabled !== false) {
+    const nextMs = computeNextRunAtMs(newJob);
+    if (nextMs) {
+      newJob.state = { nextRunAtMs: nextMs };
+    }
+  }
+
   jobs[jobId] = newJob;
   await writeCronJobs(jobs);
-  
-  logger.info('Cron job created', { jobId, name: newJob.name });
-  return newJob;
+
+  logger.info('Cron job created via file fallback', { jobId, name: newJob.name });
+  return fromOfficialFormat(newJob);
 }
 
 /**
- * Update an existing cron job
+ * Update an existing cron job via Gateway cron.update.
+ * Falls back to direct file write if the Gateway tool is unavailable.
  * @param {string} jobId - Job ID
- * @param {Object} payload - Update payload (partial)
+ * @param {Object} payload - Dashboard-format update payload
  * @returns {Promise<Object>} Updated job
  */
 async function updateCronJob(jobId, payload) {
+  const officialPatch = toOfficialFormat(payload);
+
+  // Try Gateway cron.update first
+  try {
+    const { invokeTool } = require('./openclawGatewayClient');
+    const result = await invokeTool('cron.update', {
+      jobId,
+      patch: officialPatch,
+    });
+    if (result) {
+      const job = result.job || result;
+      logger.info('Cron job updated via Gateway cron.update', { jobId, name: payload.name });
+      return fromOfficialFormat({
+        ...job,
+        jobId,
+        id: jobId,
+        source: 'gateway',
+      });
+    }
+  } catch (gatewayErr) {
+    if (gatewayErr.code === 'SERVICE_NOT_CONFIGURED' || gatewayErr.code === 'SERVICE_UNAVAILABLE') {
+      throw gatewayErr;
+    }
+    logger.warn('Gateway cron.update failed, falling back to file write', {
+      error: gatewayErr.message,
+    });
+  }
+
+  // Fallback: update in jobs.json directly
   const jobs = await readCronJobs();
-  
+
   if (!jobs[jobId]) {
     const err = new Error(`Cron job not found: ${jobId}`);
     err.status = 404;
     err.code = 'NOT_FOUND';
     throw err;
   }
-  
+
   const existingJob = jobs[jobId];
-  
-  // Don't allow updating config jobs
+
   if (existingJob.source === 'config') {
     const err = new Error('Cannot update config-sourced cron jobs');
     err.status = 403;
     err.code = 'FORBIDDEN';
     throw err;
   }
-  
-  // Merge update with existing job
+
   const updatedJob = {
     ...existingJob,
-    ...payload,
-    jobId, // Preserve ID
+    ...officialPatch,
+    jobId,
     id: jobId,
-    source: 'gateway', // Force gateway source
-    updatedAt: new Date().toISOString()
+    source: 'gateway',
+    updatedAt: new Date().toISOString(),
   };
-  
-  // Validate merged job
-  const validation = validateCronJob(updatedJob);
+
+  const validation = validateCronJob({
+    ...updatedJob,
+    payload: { message: updatedJob.payload?.text || updatedJob.payload?.message },
+  });
   if (!validation.valid) {
     const err = new Error(`Invalid cron job update: ${validation.errors.join(', ')}`);
     err.status = 400;
@@ -239,8 +420,7 @@ async function updateCronJob(jobId, payload) {
     err.errors = validation.errors;
     throw err;
   }
-  
-  // Check for duplicate name (excluding current job)
+
   const otherJobs = Object.entries(jobs).filter(([id]) => id !== jobId);
   const existingNames = otherJobs.map(([, j]) => j.name);
   if (existingNames.includes(updatedJob.name)) {
@@ -249,78 +429,209 @@ async function updateCronJob(jobId, payload) {
     err.code = 'DUPLICATE_NAME';
     throw err;
   }
-  
+
+  // Recompute state.nextRunAtMs when schedule or enabled changes
+  if (updatedJob.enabled !== false) {
+    const nextMs = computeNextRunAtMs(updatedJob);
+    if (nextMs) {
+      updatedJob.state = { ...(updatedJob.state || {}), nextRunAtMs: nextMs };
+    }
+  } else {
+    updatedJob.state = {};
+  }
+
   jobs[jobId] = updatedJob;
   await writeCronJobs(jobs);
-  
-  logger.info('Cron job updated', { jobId, name: updatedJob.name });
-  return updatedJob;
+
+  logger.info('Cron job updated via file fallback', { jobId, name: updatedJob.name });
+  return fromOfficialFormat(updatedJob);
 }
 
 /**
- * Delete a cron job
+ * Delete a cron job via Gateway cron.remove.
+ * Falls back to direct file write if the Gateway tool is unavailable.
  * @param {string} jobId - Job ID
  */
 async function deleteCronJob(jobId) {
+  // Try Gateway cron.remove first
+  try {
+    const { invokeTool } = require('./openclawGatewayClient');
+    const result = await invokeTool('cron.remove', { jobId });
+    if (result !== null) {
+      logger.info('Cron job deleted via Gateway cron.remove', { jobId });
+      return;
+    }
+  } catch (gatewayErr) {
+    if (gatewayErr.code === 'SERVICE_NOT_CONFIGURED' || gatewayErr.code === 'SERVICE_UNAVAILABLE') {
+      throw gatewayErr;
+    }
+    logger.warn('Gateway cron.remove failed, falling back to file write', {
+      error: gatewayErr.message,
+    });
+  }
+
+  // Fallback: delete from jobs.json
   const jobs = await readCronJobs();
-  
+
   if (!jobs[jobId]) {
     const err = new Error(`Cron job not found: ${jobId}`);
     err.status = 404;
     err.code = 'NOT_FOUND';
     throw err;
   }
-  
+
   const job = jobs[jobId];
-  
-  // Don't allow deleting config jobs
+
   if (job.source === 'config') {
     const err = new Error('Cannot delete config-sourced cron jobs');
     err.status = 403;
     err.code = 'FORBIDDEN';
     throw err;
   }
-  
+
   delete jobs[jobId];
   await writeCronJobs(jobs);
-  
-  logger.info('Cron job deleted', { jobId, name: job.name });
+
+  logger.info('Cron job deleted via file fallback', { jobId, name: job.name });
 }
 
 /**
- * Set enabled state for a cron job
+ * Set enabled state for a cron job via Gateway cron.update.
+ * Falls back to direct file write if the Gateway tool is unavailable.
  * @param {string} jobId - Job ID
  * @param {boolean} enabled - Enabled state
  * @returns {Promise<Object>} Updated job
  */
 async function setCronJobEnabled(jobId, enabled) {
+  // Try Gateway cron.update first
+  try {
+    const { invokeTool } = require('./openclawGatewayClient');
+    const result = await invokeTool('cron.update', {
+      jobId,
+      patch: { enabled },
+    });
+    if (result) {
+      const job = result.job || result;
+      logger.info('Cron job enabled state updated via Gateway', { jobId, enabled });
+      return fromOfficialFormat({
+        ...job,
+        jobId,
+        id: jobId,
+        source: 'gateway',
+      });
+    }
+  } catch (gatewayErr) {
+    if (gatewayErr.code === 'SERVICE_NOT_CONFIGURED' || gatewayErr.code === 'SERVICE_UNAVAILABLE') {
+      throw gatewayErr;
+    }
+    logger.warn('Gateway cron.update (enabled) failed, falling back to file write', {
+      error: gatewayErr.message,
+    });
+  }
+
+  // Fallback: update in jobs.json
   const jobs = await readCronJobs();
-  
+
   if (!jobs[jobId]) {
     const err = new Error(`Cron job not found: ${jobId}`);
     err.status = 404;
     err.code = 'NOT_FOUND';
     throw err;
   }
-  
+
   const job = jobs[jobId];
-  
-  // Don't allow updating config jobs
+
   if (job.source === 'config') {
     const err = new Error('Cannot update config-sourced cron jobs');
     err.status = 403;
     err.code = 'FORBIDDEN';
     throw err;
   }
-  
+
   job.enabled = enabled;
   job.updatedAt = new Date().toISOString();
-  
+
+  if (enabled) {
+    // Re-compute nextRunAtMs so the Gateway re-arms the timer
+    const nextMs = computeNextRunAtMs(job);
+    if (nextMs) {
+      job.state = { ...(job.state || {}), nextRunAtMs: nextMs };
+    }
+  } else {
+    // Clear nextRunAtMs when disabling
+    job.state = {};
+  }
+
   jobs[jobId] = job;
   await writeCronJobs(jobs);
-  
-  logger.info('Cron job enabled state updated', { jobId, name: job.name, enabled });
-  return job;
+
+  logger.info('Cron job enabled state updated via file fallback', { jobId, name: job.name, enabled });
+  return fromOfficialFormat(job);
+}
+
+/**
+ * Manually trigger a cron job to run immediately.
+ *
+ * Sets state.nextRunAtMs to a few seconds from now so the Gateway fires
+ * the job on its next timer tick (~60 s polling interval).
+ *
+ * @param {string} jobId - Job ID
+ * @returns {Promise<Object>} The triggered job in dashboard format
+ */
+async function triggerCronJob(jobId) {
+  // Try Gateway cron.run first
+  try {
+    const { invokeTool } = require('./openclawGatewayClient');
+    const result = await invokeTool('cron.run', { jobId });
+    if (result) {
+      logger.info('Cron job triggered via Gateway', { jobId });
+      const job = result.job || result;
+      return fromOfficialFormat({
+        ...job,
+        jobId,
+        id: jobId,
+        source: 'gateway',
+      });
+    }
+  } catch (gatewayErr) {
+    if (gatewayErr.code === 'SERVICE_NOT_CONFIGURED' || gatewayErr.code === 'SERVICE_UNAVAILABLE') {
+      throw gatewayErr;
+    }
+    logger.warn('Gateway cron.run failed, falling back to file trigger', {
+      error: gatewayErr.message,
+    });
+  }
+
+  // Fallback: set nextRunAtMs to near-immediate so the Gateway fires it
+  const jobs = await readCronJobs();
+
+  if (!jobs[jobId]) {
+    const err = new Error(`Cron job not found: ${jobId}`);
+    err.status = 404;
+    err.code = 'NOT_FOUND';
+    throw err;
+  }
+
+  const job = jobs[jobId];
+
+  if (job.enabled === false) {
+    const err = new Error('Cannot trigger a disabled cron job. Enable it first.');
+    err.status = 400;
+    err.code = 'JOB_DISABLED';
+    throw err;
+  }
+
+  // Set nextRunAtMs to 3 seconds from now — the Gateway picks it up on
+  // its next 60 s timer tick and fires the job.
+  job.state = { ...(job.state || {}), nextRunAtMs: Date.now() + 3000 };
+  jobs[jobId] = job;
+  await writeCronJobs(jobs);
+
+  logger.info('Cron job trigger requested via file fallback (nextRunAtMs set to now)', {
+    jobId,
+    name: job.name,
+  });
+  return fromOfficialFormat(job);
 }
 
 /**
@@ -331,7 +642,6 @@ async function setCronJobEnabled(jobId, enabled) {
  */
 async function updateHeartbeatConfig(agentId, heartbeatConfig) {
   try {
-    // Read current OpenClaw config
     const configPath = '/openclaw.json';
     const configContent = await getFileContent(configPath);
     
@@ -344,13 +654,10 @@ async function updateHeartbeatConfig(agentId, heartbeatConfig) {
     
     const config = JSON.parse(typeof configContent === 'string' ? configContent : configContent.content || configContent);
     
-    // Find the agent in config - handle both agents.list and agents array formats
     let agentsList = null;
     if (config.agents && Array.isArray(config.agents.list)) {
-      // New format: { agents: { list: [...] } }
       agentsList = config.agents.list;
     } else if (config.agents && Array.isArray(config.agents)) {
-      // Old format: { agents: [...] }
       agentsList = config.agents;
     } else {
       const err = new Error('Invalid OpenClaw config structure: agents.list or agents array not found');
@@ -367,21 +674,17 @@ async function updateHeartbeatConfig(agentId, heartbeatConfig) {
       throw err;
     }
     
-    // Update heartbeat config
     const agent = agentsList[agentIndex];
     if (!agent.heartbeat) {
       agent.heartbeat = {};
     }
     
-    // Merge heartbeat config
     Object.assign(agent.heartbeat, heartbeatConfig);
     
-    // Write back to OpenClaw config
     await putFileContent(configPath, JSON.stringify(config, null, 2));
     
     logger.info('Heartbeat config updated', { agentId, heartbeatConfig });
     
-    // Best-effort: try to trigger config reload
     try {
       const { invokeTool } = require('./openclawGatewayClient');
       await invokeTool('config.reload', {});
@@ -406,7 +709,6 @@ async function updateHeartbeatConfig(agentId, heartbeatConfig) {
  * @returns {Promise<Object>} Updated job
  */
 async function updateHeartbeatJob(jobId, payload) {
-  // Extract agent ID from job ID (format: heartbeat-{agentId})
   const agentId = jobId.replace('heartbeat-', '');
   
   if (!agentId) {
@@ -416,10 +718,8 @@ async function updateHeartbeatJob(jobId, payload) {
     throw err;
   }
   
-  // Build heartbeat config from payload
   const heartbeatConfig = {};
   
-  // Handle schedule
   if (payload.schedule) {
     if (payload.schedule.kind === 'every' && payload.schedule.label) {
       heartbeatConfig.every = payload.schedule.label;
@@ -428,7 +728,6 @@ async function updateHeartbeatJob(jobId, payload) {
     }
   }
   
-  // Handle payload fields
   if (payload.payload) {
     if (payload.payload.model) {
       heartbeatConfig.model = payload.payload.model;
@@ -447,10 +746,8 @@ async function updateHeartbeatJob(jobId, payload) {
     }
   }
   
-  // Update the config
   const updatedConfig = await updateHeartbeatConfig(agentId, heartbeatConfig);
   
-  // Return job-like structure for consistency
   return {
     jobId,
     id: jobId,
@@ -474,9 +771,12 @@ module.exports = {
   updateCronJob,
   deleteCronJob,
   setCronJobEnabled,
+  triggerCronJob,
   updateHeartbeatJob,
   updateHeartbeatConfig,
   readCronJobs,
   writeCronJobs,
-  validateCronJob
+  validateCronJob,
+  toOfficialFormat,
+  fromOfficialFormat,
 };
