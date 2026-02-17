@@ -75,7 +75,7 @@ router.get('/workspace/files', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/v1/openclaw/workspace/files/content
-// Read file content (admin/owner for all paths, all authenticated users for /workspace/docs/**)
+// Read file content (admin/owner for all paths, all authenticated users for /docs/**)
 router.get('/workspace/files/content', requireAuth, async (req, res, next) => {
   try {
     const { path: inputPath } = req.query;
@@ -89,7 +89,8 @@ router.get('/workspace/files/content', requireAuth, async (req, res, next) => {
     const workspacePath = normalizeAndValidateWorkspacePath(inputPath);
     
     // Check if this is a docs path (accessible to all authenticated users)
-    const isDocsPath = workspacePath === '/workspace/docs' || workspacePath.startsWith('/workspace/docs/');
+    // Docs live at system level /docs/ (not inside any agent workspace)
+    const isDocsPath = workspacePath === '/docs' || workspacePath.startsWith('/docs/');
     
     // For non-docs paths, require admin/owner/agent role
     if (!isDocsPath && !['admin', 'agent', 'owner'].includes(req.user?.role)) {
@@ -367,15 +368,15 @@ router.get('/agents', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/v1/openclaw/org-chart
-// Get organization chart configuration from workspace
+// Get organization chart configuration
 router.get('/org-chart', requireAuth, async (req, res, next) => {
   try {
-    logger.info('Fetching org chart configuration from workspace', { userId: req.user.id });
+    logger.info('Fetching org chart configuration', { userId: req.user.id });
     
     try {
-      // Read org-chart.json from workspace directory (separate from openclaw.json to avoid config validation issues)
-      // Located in workspace/ so it can be updated at runtime via the workspace service file API
-      const data = await makeOpenClawRequest('GET', '/files/content?path=/workspace/org-chart.json');
+      // Read org-chart.json from system level (alongside openclaw.json)
+      // Can be updated at runtime via the workspace service file API
+      const data = await makeOpenClawRequest('GET', '/files/content?path=/org-chart.json');
       const orgChart = JSON.parse(data.content);
       
       // Basic validation
@@ -503,8 +504,8 @@ router.get('/org-chart', requireAuth, async (req, res, next) => {
           return { leadership, departments };
         };
         
-        // Try multiple paths: workspace copy (may still have orgChart keys), then PVC root config
-        const configPaths = ['/workspace/openclaw.json', '/openclaw.json'];
+        // Try openclaw.json at system level as fallback for org chart data
+        const configPaths = ['/openclaw.json'];
         
         for (const configPath of configPaths) {
           try {
