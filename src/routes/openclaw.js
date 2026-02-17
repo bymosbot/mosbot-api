@@ -318,7 +318,7 @@ router.get('/agents', requireAuth, async (req, res, next) => {
           label: 'Chief Operating Officer',
           description: 'Operations and workflow management',
           icon: '📊',
-          workspace: '/home/node/.openclaw/workspace-coo',
+          workspace: '/home/node/.openclaw/workspace',
           isDefault: true
         }
       ];
@@ -346,7 +346,7 @@ router.get('/agents', requireAuth, async (req, res, next) => {
             label: 'Chief Operating Officer',
             description: 'Operations and workflow management',
             icon: '📊',
-            workspace: '/home/node/.openclaw/workspace-coo',
+            workspace: '/home/node/.openclaw/workspace',
             isDefault: true
           },
           {
