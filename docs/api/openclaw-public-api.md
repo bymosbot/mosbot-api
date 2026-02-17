@@ -1011,12 +1011,28 @@ Response `200`:
         "path": "/example.txt",
         "type": "file",
         "size": 1024,
-        "modified": "2026-02-05T12:34:56.789Z"
+        "modified": "2026-02-05T12:34:56.789Z",
+        "created": "2026-02-01T10:00:00.000Z"
+      },
+      {
+        "name": "docs",
+        "path": "/docs",
+        "type": "directory",
+        "size": 4096,
+        "modified": "2026-02-05T12:34:56.789Z",
+        "created": "2026-02-01T10:00:00.000Z",
+        "isSymlink": true,
+        "symlinkTarget": "/shared/documentation"
       }
     ]
   }
 }
 ```
+
+**Symlink fields** (present only when `isSymlink: true`):
+
+- `isSymlink` (boolean): `true` if the file/directory is a symbolic link
+- `symlinkTarget` (string): The path the symlink points to (may be relative or absolute)
 
 Errors:
 

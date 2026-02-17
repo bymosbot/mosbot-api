@@ -46,13 +46,13 @@ async function makeOpenClawGatewayRequest(path, body = null, retryCount = 0) {
   }
   
   const url = `${gatewayUrl}${path}`;
+  const timeoutMs = parseInt(process.env.OPENCLAW_GATEWAY_TIMEOUT_MS || '15000', 10);
   const options = {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
     },
-    // Add timeout to prevent hanging requests (10 seconds)
-    signal: AbortSignal.timeout(10000),
+    signal: AbortSignal.timeout(timeoutMs),
   };
   
   // Add auth token if configured
