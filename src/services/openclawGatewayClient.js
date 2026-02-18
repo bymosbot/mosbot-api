@@ -351,7 +351,8 @@ async function cronList() {
     const { getFileContent } = require('./openclawWorkspaceClient');
     const content = await getFileContent('/cron/jobs.json');
     if (content) {
-      const parsed = JSON.parse(typeof content === 'string' ? content : content.content || content);
+      const raw = typeof content === 'string' ? content : content.content || content;
+      const parsed = parseJsonWithLiteralNewlines(raw);
       const jobs = extractJobsArray(parsed);
       if (jobs.length > 0) {
         logger.info('cron jobs loaded from jobs.json fallback', { count: jobs.length });
@@ -365,6 +366,66 @@ async function cronList() {
   }
 
   return [];
+}
+
+/**
+ * Parse JSON that may contain literal (unescaped) newline characters and/or
+ * unescaped double-quote characters inside string values — a common artifact
+ * when OpenClaw writes multiline payloads (e.g. markdown code blocks) to jobs.json.
+ *
+ * Strategy:
+ *  1. Try a direct JSON.parse (fast path).
+ *  2. Find markdown code blocks that are delimited by *literal* newlines
+ *     (i.e. the code block was written raw into a JSON string without escaping).
+ *     Escape their content: literal \n → \\n, unescaped " → \".
+ *  3. Escape any remaining bare \n/\r that sit inside JSON string values
+ *     using a character-by-character walk.
+ *  4. Final JSON.parse attempt.
+ */
+function parseJsonWithLiteralNewlines(str) {
+  // Fast path
+  try { return JSON.parse(str); } catch (_) { /* fall through */ }
+
+  // Pass 1: fix markdown code blocks that contain literal newlines + unescaped quotes.
+  // These appear when OpenClaw writes a payload message that includes a ```json ... ```
+  // example block without escaping the content for JSON string embedding.
+  // Pattern: literal-newline + ```[lang] + literal-newline + content + literal-newline + ``` + literal-newline
+  let fixed = str.replace(/\n(```[a-z]*)\n([\s\S]*?)\n(```)\n/g, (_match, open, codeContent, close) => {
+    const escapedContent = codeContent
+      .replace(/\\/g, '\\\\')   // escape existing backslashes first
+      .replace(/"/g, '\\"')     // escape unescaped double quotes
+      .replace(/\n/g, '\\n')    // escape remaining literal newlines
+      .replace(/\r/g, '\\r');
+    return '\\n' + open + '\\n' + escapedContent + '\\n' + close + '\\n';
+  });
+
+  try { return JSON.parse(fixed); } catch (_) { /* fall through */ }
+
+  // Pass 2: escape any remaining bare \n/\r inside JSON string values.
+  let sanitized = '';
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < fixed.length; i++) {
+    const ch = fixed[i];
+    if (escaped) {
+      sanitized += ch;
+      escaped = false;
+    } else if (ch === '\\' && inString) {
+      sanitized += ch;
+      escaped = true;
+    } else if (ch === '"') {
+      sanitized += ch;
+      inString = !inString;
+    } else if (inString && ch === '\n') {
+      sanitized += '\\n';
+    } else if (inString && ch === '\r') {
+      sanitized += '\\r';
+    } else {
+      sanitized += ch;
+    }
+  }
+
+  return JSON.parse(sanitized); // throws if still broken
 }
 
 /**

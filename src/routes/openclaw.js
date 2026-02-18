@@ -1400,84 +1400,7 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
       }),
 
       // 2. Heartbeat configs from openclaw.json + runtime last-run data
-      (async () => {
-        try {
-          const data = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
-          const config = JSON.parse(data.content);
-          const agentsList = config?.agents?.list || [];
-          const agentsWithHeartbeat = agentsList.filter(agent => agent.heartbeat);
-
-          // Read last heartbeat timestamps in parallel for each agent
-          const heartbeatResults = await Promise.all(
-            agentsWithHeartbeat.map(async (agent) => {
-              const hb = agent.heartbeat;
-              const intervalMs = parseInterval(hb.every);
-
-              // Try to read the agent's last heartbeat file
-              let lastRunAt = null;
-              let nextRunAt = null;
-              try {
-                const workspaceBase = agent.workspace || `/home/node/.openclaw/workspace-${agent.id}`;
-                // The workspace service mounts the state PVC at /workspace,
-                // so agent workspace paths like /home/node/.openclaw/workspace-coo
-                // are accessible at /workspace-coo relative to the workspace service root
-                const relativePath = workspaceBase.replace(/^\/home\/node\/\.openclaw\//, '/');
-                const hbData = await makeOpenClawRequest(
-                  'GET',
-                  `/files/content?path=${encodeURIComponent(`${relativePath}/runtime/heartbeat/last.json`)}`
-                );
-                if (hbData?.content) {
-                  const parsed = JSON.parse(hbData.content);
-                  if (parsed.lastHeartbeat) {
-                    lastRunAt = parsed.lastHeartbeat;
-                    if (intervalMs) {
-                      nextRunAt = new Date(new Date(lastRunAt).getTime() + intervalMs).toISOString();
-                    }
-                  }
-                }
-              } catch (_hbReadError) {
-                // Heartbeat file may not exist yet — that's fine
-              }
-
-              return {
-                jobId: `heartbeat-${agent.id}`,
-                name: `${agent.identity?.name || agent.id} Heartbeat`,
-                description: `Periodic heartbeat for the ${agent.identity?.name || agent.id} agent.`,
-                source: 'config',
-                enabled: true,
-                agentId: agent.id,
-                agentEmoji: agent.identity?.emoji || null,
-                sessionTarget: hb.session || 'main',
-                schedule: {
-                  kind: 'every',
-                  everyMs: intervalMs,
-                  label: hb.every,
-                },
-                payload: {
-                  kind: 'heartbeat',
-                  model: hb.model || null,
-                  session: hb.session || 'main',
-                  target: hb.target || 'last',
-                  prompt: hb.prompt || null,
-                  ackMaxChars: hb.ackMaxChars || 200,
-                },
-                delivery: {
-                  mode: hb.target === 'last' ? 'announce (last)' : (hb.target || 'none'),
-                },
-                lastRunAt,
-                nextRunAt,
-              };
-            })
-          );
-
-          return heartbeatResults;
-        } catch (readError) {
-          logger.warn('Could not read OpenClaw config for heartbeats', {
-            error: readError.message,
-          });
-          return [];
-        }
-      })(),
+      getHeartbeatJobsFromConfig(),
     ]);
 
     // Normalize gateway jobs: map common OpenClaw field names to our schema
@@ -1790,6 +1713,79 @@ function parseInterval(str) {
   const unit = match[2].toLowerCase();
   const multipliers = { s: 1000, m: 60000, h: 3600000, d: 86400000 };
   return value * (multipliers[unit] || 60000);
+}
+
+/** Fetch heartbeat jobs from openclaw.json + runtime last-run data (for cron-jobs and cron-jobs/stats). */
+async function getHeartbeatJobsFromConfig() {
+  try {
+    const data = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+    const config = JSON.parse(data.content);
+    const agentsList = config?.agents?.list || [];
+    const agentsWithHeartbeat = agentsList.filter(agent => agent.heartbeat);
+
+    const heartbeatResults = await Promise.all(
+      agentsWithHeartbeat.map(async (agent) => {
+        const hb = agent.heartbeat;
+        const intervalMs = parseInterval(hb.every);
+
+        let lastRunAt = null;
+        let nextRunAt = null;
+        try {
+          const workspaceBase = agent.workspace || `/home/node/.openclaw/workspace-${agent.id}`;
+          const relativePath = workspaceBase.replace(/^\/home\/node\/\.openclaw\//, '/');
+          const hbData = await makeOpenClawRequest(
+            'GET',
+            `/files/content?path=${encodeURIComponent(`${relativePath}/runtime/heartbeat/last.json`)}`
+          );
+          if (hbData?.content) {
+            const parsed = JSON.parse(hbData.content);
+            if (parsed.lastHeartbeat) {
+              lastRunAt = parsed.lastHeartbeat;
+              if (intervalMs) {
+                nextRunAt = new Date(new Date(lastRunAt).getTime() + intervalMs).toISOString();
+              }
+            }
+          }
+        } catch (_hbReadError) {
+          // Heartbeat file may not exist yet
+        }
+
+        return {
+          jobId: `heartbeat-${agent.id}`,
+          name: `${agent.identity?.name || agent.id} Heartbeat`,
+          description: `Periodic heartbeat for the ${agent.identity?.name || agent.id} agent.`,
+          source: 'config',
+          enabled: true,
+          agentId: agent.id,
+          agentEmoji: agent.identity?.emoji || null,
+          sessionTarget: hb.session || 'main',
+          schedule: {
+            kind: 'every',
+            everyMs: intervalMs,
+            label: hb.every,
+          },
+          payload: {
+            kind: 'heartbeat',
+            model: hb.model || null,
+            session: hb.session || 'main',
+            target: hb.target || 'last',
+            prompt: hb.prompt || null,
+            ackMaxChars: hb.ackMaxChars || 200,
+          },
+          delivery: {
+            mode: hb.target === 'last' ? 'announce (last)' : (hb.target || 'none'),
+          },
+          lastRunAt,
+          nextRunAt,
+        };
+      })
+    );
+
+    return heartbeatResults;
+  } catch (readError) {
+    logger.warn('Could not read OpenClaw config for heartbeats', { error: readError.message });
+    return [];
+  }
 }
 
 // POST /api/v1/openclaw/cron-jobs
