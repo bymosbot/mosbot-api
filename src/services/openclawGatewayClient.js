@@ -470,7 +470,7 @@ async function sessionsListAllViaWs({ includeGlobal = true, includeUnknown = fal
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
-        try { ws.close(); } catch (_) {}
+        try { ws.close(); } catch (_) { void _; }
         const err = new Error('OpenClaw gateway WebSocket request timed out');
         err.status = 503;
         err.code = 'SERVICE_TIMEOUT';
@@ -552,7 +552,7 @@ async function sessionsListAllViaWs({ includeGlobal = true, includeUnknown = fal
         if (!settled) {
           settled = true;
           clearTimeout(timer);
-          try { ws.close(); } catch (_) {}
+          try { ws.close(); } catch (_) { void _; }
           reject(err);
         }
       }
@@ -609,7 +609,7 @@ async function gatewayWsRpc(method, params = {}) {
     const timer = setTimeout(() => {
       if (!settled) {
         settled = true;
-        try { ws.close(); } catch (_) {}
+        try { ws.close(); } catch (_) { void _; }
         const err = new Error('OpenClaw gateway WebSocket request timed out');
         err.status = 503;
         err.code = 'SERVICE_TIMEOUT';
@@ -670,7 +670,7 @@ async function gatewayWsRpc(method, params = {}) {
         if (!settled) {
           settled = true;
           clearTimeout(timer);
-          try { ws.close(); } catch (_) {}
+          try { ws.close(); } catch (_) { void _; }
           reject(err);
         }
       }

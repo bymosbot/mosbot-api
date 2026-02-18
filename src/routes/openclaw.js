@@ -2100,7 +2100,7 @@ router.get('/cron-jobs/stats', requireAuth, async (req, res, next) => {
             const parsed = new CronExpressionParser(expr);
             const next = parsed.next();
             nextRunAt = next.toISOString();
-          } catch (e) {
+          } catch (_e) {
             // fallback: no next run
             nextRunAt = null;
           }
