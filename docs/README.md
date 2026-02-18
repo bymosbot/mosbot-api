@@ -15,6 +15,8 @@ This folder contains **human-oriented** documentation for Mosbot API. Some docum
 - **RBAC / permissions**: `docs/security/roles-and-permissions.md`
 - **Public API contract (OpenClaw integration)**: `docs/api/openclaw-public-api.md`
 - **OpenClaw workspace integration (implementation)**: `docs/openclaw/workspace/`
+- **Standups feature**: `docs/features/standups.md`
+- **Model fleet management**: `docs/features/model-fleet-management.md`
 
 ## Where to put new docs
 
