@@ -983,9 +983,9 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
     // Query sessions from each agent using the full agent session key format.
     // The sessionKey in /tools/invoke must be the full key (e.g., "agent:coo:main")
     // to run the tool in that agent's context and see that agent's session store.
-    // We request ALL session kinds (main, cron, hook, group, node, other) so that
-    // cron-triggered sessions and hook sessions are included alongside regular ones.
-    const ALL_SESSION_KINDS = ['main', 'group', 'cron', 'hook', 'node', 'other'];
+    // We request ALL session kinds (main, cron, hook, group, node, subagent, other) so that
+    // cron-triggered sessions, hook sessions, and subagent sessions are included alongside regular ones.
+    const ALL_SESSION_KINDS = ['main', 'group', 'cron', 'hook', 'node', 'subagent', 'other'];
     
     const sessionPromises = agentIds.map(agentId => {
       // Use the full session key format: "agent:<agentId>:main" for non-main agents
