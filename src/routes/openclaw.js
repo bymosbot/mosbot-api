@@ -380,10 +380,11 @@ router.get('/agents', requireAuth, async (req, res, next) => {
       const filteredAgents = agentsList;
       
       // Transform to include workspace path info and add default COO if empty
-      const agents = filteredAgents.length > 0 ? filteredAgents.map(agent => ({
+      let agents = filteredAgents.length > 0 ? filteredAgents.map(agent => ({
         id: agent.id,
         name: agent.identity?.name || agent.name || agent.id,
         label: agent.identity?.name || agent.name || agent.id,
+        title: agent.identity?.title || null,
         description: agent.identity?.theme || `${agent.identity?.name || agent.id} workspace`,
         icon: agent.identity?.emoji || '🤖',
         workspace: agent.workspace,
@@ -394,12 +395,31 @@ router.get('/agents', requireAuth, async (req, res, next) => {
           id: 'coo',
           name: 'COO',
           label: 'Chief Operating Officer',
+          title: null,
           description: 'Operations and workflow management',
           icon: '📊',
           workspace: '/home/node/.openclaw/workspace',
           isDefault: true
         }
       ];
+
+      // Enrich agent names from users table (users.name is the canonical display name)
+      try {
+        const pool = require('../db/pool');
+        const agentIds = agents.map(a => a.id);
+        const result = await pool.query(
+          'SELECT agent_id, name FROM users WHERE agent_id = ANY($1)',
+          [agentIds]
+        );
+        const userNameMap = new Map(result.rows.map(r => [r.agent_id, r.name]));
+        agents = agents.map(agent => {
+          const userName = userNameMap.get(agent.id);
+          if (!userName) return agent;
+          return { ...agent, name: userName, label: userName };
+        });
+      } catch (dbErr) {
+        logger.warn('Could not enrich agents with user names from DB', { error: dbErr.message });
+      }
       
       // Sort so default agent comes first
       agents.sort((a, b) => {
@@ -1118,17 +1138,40 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
     
     // Sort by updatedAt descending (most recent first)
     transformedSessions.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    
+
+    // Enrich sessions with agent display names from users table
+    const sessionAgentNameMap = new Map();
+    try {
+      const pool = require('../db/pool');
+      const sessionAgentIds = [...new Set(transformedSessions.map(s => s.agent).filter(Boolean))];
+      if (sessionAgentIds.length > 0) {
+        const result = await pool.query(
+          'SELECT agent_id, name FROM users WHERE agent_id = ANY($1)',
+          [sessionAgentIds]
+        );
+        result.rows.forEach(row => {
+          sessionAgentNameMap.set(row.agent_id, row.name);
+        });
+      }
+    } catch (dbErr) {
+      logger.warn('Could not query users table for session agent names', { error: dbErr.message });
+    }
+
+    const enrichedSessions = transformedSessions.map(session => ({
+      ...session,
+      agentName: sessionAgentNameMap.get(session.agent) || null,
+    }));
+
     logger.info('Returning sessions', { 
       userId: req.user.id,
-      total: transformedSessions.length,
-      running: transformedSessions.filter(s => s.status === 'running').length,
-      active: transformedSessions.filter(s => s.status === 'active').length,
-      idle: transformedSessions.filter(s => s.status === 'idle').length
+      total: enrichedSessions.length,
+      running: enrichedSessions.filter(s => s.status === 'running').length,
+      active: enrichedSessions.filter(s => s.status === 'active').length,
+      idle: enrichedSessions.filter(s => s.status === 'idle').length
     });
     
     res.json({
-      data: transformedSessions
+      data: enrichedSessions
     });
   } catch (error) {
     // If OpenClaw Gateway is not configured, return empty array
@@ -1684,15 +1727,53 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
       };
     });
 
+    // Enrich jobs with agent display names from users table (agent_id -> name)
+    // and agent titles from openclaw.json (identity.title)
+    const agentNameMap = new Map();
+    const agentTitleMap = new Map();
+
+    // Build title map from openclaw.json
+    (openclawConfig?.agents?.list || []).forEach(agent => {
+      if (agent.id) {
+        agentTitleMap.set(agent.id, agent.identity?.title || null);
+      }
+    });
+
+    // Query users table for display names
+    try {
+      const pool = require('../db/pool');
+      const allAgentIds = [...new Set(jobsWithExecutionData.map(j => j.agentId).filter(Boolean))];
+      if (allAgentIds.length > 0) {
+        const result = await pool.query(
+          'SELECT agent_id, name FROM users WHERE agent_id = ANY($1)',
+          [allAgentIds]
+        );
+        result.rows.forEach(row => {
+          agentNameMap.set(row.agent_id, row.name);
+        });
+      }
+    } catch (dbErr) {
+      logger.warn('Could not query users table for agent names', { error: dbErr.message });
+    }
+
+    const finalJobs = jobsWithExecutionData.map(job => {
+      if (!job.agentId) return job;
+      return {
+        ...job,
+        agentName: agentNameMap.get(job.agentId) || null,
+        agentTitle: agentTitleMap.get(job.agentId) || null,
+      };
+    });
+
     logger.info('Cron jobs aggregated', {
       userId: req.user.id,
       gateway: taggedGatewayJobs.length,
       heartbeats: heartbeatJobs.length,
-      total: jobsWithExecutionData.length,
-      withExecutionData: jobsWithExecutionData.filter(j => j.lastExecution).length,
+      total: finalJobs.length,
+      withExecutionData: finalJobs.filter(j => j.lastExecution).length,
     });
 
-    res.json({ data: jobsWithExecutionData });
+    res.json({ data: finalJobs });
   } catch (error) {
     if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
       logger.warn('OpenClaw not available for cron jobs, returning empty array', {
