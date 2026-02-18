@@ -2,6 +2,7 @@ const express = require('express');
 const pool = require('../db/pool');
 const { authenticateToken, requireAdmin } = require('./auth');
 const logger = require('../utils/logger');
+const { makeOpenClawRequest } = require('../services/openclawWorkspaceClient');
 
 const router = express.Router();
 
@@ -42,13 +43,14 @@ router.get('/', authenticateToken, async (req, res, next) => {
           JSON_BUILD_OBJECT(
             'agent_id',    se.agent_id,
             'user_id',     se.user_id,
-            'user_name',   u.name,
-            'avatar_url',  u.avatar_url
+            'user_name',   COALESCE(u_uid.name, u_aid.name),
+            'avatar_url',  COALESCE(u_uid.avatar_url, u_aid.avatar_url)
           ) ORDER BY se.turn_order
         ) FILTER (WHERE se.id IS NOT NULL) AS participants
       FROM standups s
       LEFT JOIN standup_entries se ON s.id = se.standup_id
-      LEFT JOIN users u ON se.user_id = u.id
+      LEFT JOIN users u_uid ON se.user_id = u_uid.id
+      LEFT JOIN users u_aid ON se.agent_id = u_aid.agent_id
       GROUP BY s.id
       ORDER BY s.standup_date DESC, s.created_at DESC
       LIMIT $1 OFFSET $2`,
@@ -91,13 +93,14 @@ router.get('/latest', authenticateToken, async (req, res, next) => {
           JSON_BUILD_OBJECT(
             'agent_id',    se.agent_id,
             'user_id',     se.user_id,
-            'user_name',   u.name,
-            'avatar_url',  u.avatar_url
+            'user_name',   COALESCE(u_uid.name, u_aid.name),
+            'avatar_url',  COALESCE(u_uid.avatar_url, u_aid.avatar_url)
           ) ORDER BY se.turn_order
         ) FILTER (WHERE se.id IS NOT NULL) AS participants
       FROM standups s
       LEFT JOIN standup_entries se ON s.id = se.standup_id
-      LEFT JOIN users u ON se.user_id = u.id
+      LEFT JOIN users u_uid ON se.user_id = u_uid.id
+      LEFT JOIN users u_aid ON se.agent_id = u_aid.agent_id
       GROUP BY s.id
       ORDER BY s.standup_date DESC, s.created_at DESC
       LIMIT 1`
@@ -186,8 +189,8 @@ router.get('/:id', authenticateToken, validateUUID('id'), async (req, res, next)
         se.standup_id,
         se.agent_id,
         se.user_id,
-        u.name    AS user_name,
-        u.avatar_url,
+        COALESCE(u_uid.name, u_aid.name)           AS user_name,
+        COALESCE(u_uid.avatar_url, u_aid.avatar_url) AS avatar_url,
         se.turn_order,
         se.yesterday,
         se.today,
@@ -196,11 +199,31 @@ router.get('/:id', authenticateToken, validateUUID('id'), async (req, res, next)
         se.raw,
         se.created_at
       FROM standup_entries se
-      LEFT JOIN users u ON se.user_id = u.id
+      LEFT JOIN users u_uid ON se.user_id = u_uid.id
+      LEFT JOIN users u_aid ON se.agent_id = u_aid.agent_id
       WHERE se.standup_id = $1
       ORDER BY se.turn_order ASC`,
       [id]
     );
+
+    // Enrich entries with agent title from openclaw.json (identity.title)
+    let agentTitleMap = new Map();
+    try {
+      const configData = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+      const config = JSON.parse(configData.content);
+      (config?.agents?.list || []).forEach(agent => {
+        if (agent.id && agent.identity?.title) {
+          agentTitleMap.set(agent.id, agent.identity.title);
+        }
+      });
+    } catch (configErr) {
+      logger.warn('Could not read openclaw.json for agent titles in standup detail', { error: configErr.message });
+    }
+
+    const enrichedEntries = entriesResult.rows.map(entry => ({
+      ...entry,
+      agent_title: entry.agent_id ? (agentTitleMap.get(entry.agent_id) || null) : null,
+    }));
 
     const messagesResult = await pool.query(
       `SELECT id, standup_id, kind, agent_id, content, created_at
@@ -214,7 +237,7 @@ router.get('/:id', authenticateToken, validateUUID('id'), async (req, res, next)
     res.json({
       data: {
         ...standup,
-        entries: entriesResult.rows,
+        entries: enrichedEntries,
         messages: messagesResult.rows,
       },
     });
@@ -393,8 +416,8 @@ router.get('/:id/entries', authenticateToken, validateUUID('id'), async (req, re
         se.standup_id,
         se.agent_id,
         se.user_id,
-        u.name    AS user_name,
-        u.avatar_url,
+        COALESCE(u_uid.name, u_aid.name)             AS user_name,
+        COALESCE(u_uid.avatar_url, u_aid.avatar_url) AS avatar_url,
         se.turn_order,
         se.yesterday,
         se.today,
@@ -403,13 +426,33 @@ router.get('/:id/entries', authenticateToken, validateUUID('id'), async (req, re
         se.raw,
         se.created_at
       FROM standup_entries se
-      LEFT JOIN users u ON se.user_id = u.id
+      LEFT JOIN users u_uid ON se.user_id = u_uid.id
+      LEFT JOIN users u_aid ON se.agent_id = u_aid.agent_id
       WHERE se.standup_id = $1
       ORDER BY se.turn_order ASC`,
       [id]
     );
 
-    res.json({ data: result.rows });
+    // Enrich with agent titles from openclaw.json
+    let agentTitleMap = new Map();
+    try {
+      const configData = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+      const config = JSON.parse(configData.content);
+      (config?.agents?.list || []).forEach(agent => {
+        if (agent.id && agent.identity?.title) {
+          agentTitleMap.set(agent.id, agent.identity.title);
+        }
+      });
+    } catch (configErr) {
+      logger.warn('Could not read openclaw.json for agent titles in standup entries', { error: configErr.message });
+    }
+
+    const enrichedRows = result.rows.map(entry => ({
+      ...entry,
+      agent_title: entry.agent_id ? (agentTitleMap.get(entry.agent_id) || null) : null,
+    }));
+
+    res.json({ data: enrichedRows });
   } catch (error) {
     logger.error('Failed to fetch standup entries', { userId: req.user.id, standupId: req.params.id, error: error.message });
     next(error);

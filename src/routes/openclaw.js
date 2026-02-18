@@ -1918,6 +1918,34 @@ router.put('/cron-jobs/:jobId', requireAuth, requireAdmin, async (req, res, next
   }
 });
 
+// POST /api/v1/openclaw/cron-jobs/repair
+// Repair a corrupted jobs.json by re-escaping bare newlines in string values (admin only)
+router.post('/cron-jobs/repair', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { repairCronJobs } = require('../services/cronJobsService');
+
+    logger.info('Attempting jobs.json repair', { userId: req.user.id });
+
+    const result = await repairCronJobs();
+
+    logger.info('jobs.json repair complete', {
+      userId: req.user.id,
+      recovered: result.recovered,
+      lost: result.lost,
+    });
+
+    res.json({
+      data: {
+        recovered: result.recovered,
+        lost: result.lost,
+        message: `Repair complete. Recovered ${result.recovered} job(s).`,
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // PATCH /api/v1/openclaw/cron-jobs/:jobId/enabled
 // Toggle enabled state for a cron job (admin only)
 // Note: Heartbeat jobs cannot be enabled/disabled via this endpoint

@@ -139,8 +139,39 @@ async function readCronJobs() {
       return {};
     }
 
-    const parsed = JSON.parse(typeof content === 'string' ? content : content.content || content);
-    
+    const raw = typeof content === 'string' ? content : content.content || content;
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (parseError) {
+      logger.warn('jobs.json contains invalid JSON — attempting auto-repair', {
+        path: CRON_JOBS_PATH,
+        error: parseError.message,
+        preview: typeof raw === 'string' ? raw.substring(0, 200) : String(raw).substring(0, 200),
+      });
+
+      // Attempt to fix bare newlines inside JSON string values and retry
+      try {
+        const fixed = fixBareNewlinesInJsonStrings(typeof raw === 'string' ? raw : String(raw));
+        parsed = JSON.parse(fixed);
+        logger.info('jobs.json auto-repair succeeded — rewriting fixed content', { path: CRON_JOBS_PATH });
+        // Rewrite the fixed content so future reads don't need to repair again
+        putFileContent(CRON_JOBS_PATH, fixed).catch(writeErr => {
+          logger.warn('jobs.json auto-repair: could not rewrite fixed file', { error: writeErr.message });
+        });
+      } catch (repairError) {
+        logger.error('jobs.json auto-repair failed', {
+          path: CRON_JOBS_PATH,
+          originalError: parseError.message,
+          repairError: repairError.message,
+        });
+        const err = new Error(`jobs.json is corrupted and cannot be parsed: ${parseError.message}`);
+        err.status = 500;
+        err.code = 'JOBS_FILE_CORRUPTED';
+        throw err;
+      }
+    }
+
     if (Array.isArray(parsed)) {
       const map = {};
       parsed.forEach(job => {
@@ -382,7 +413,19 @@ async function updateCronJob(jobId, payload) {
   }
 
   // Fallback: update in jobs.json directly
-  const jobs = await readCronJobs();
+  let jobs;
+  try {
+    jobs = await readCronJobs();
+  } catch (readErr) {
+    if (readErr.code === 'JOBS_FILE_CORRUPTED') {
+      logger.warn('jobs.json is corrupted; cannot safely update without losing existing jobs', {
+        jobId,
+        error: readErr.message,
+      });
+      throw readErr;
+    }
+    throw readErr;
+  }
 
   if (!jobs[jobId]) {
     const err = new Error(`Cron job not found: ${jobId}`);
@@ -766,6 +809,116 @@ async function updateHeartbeatJob(jobId, payload) {
   };
 }
 
+/**
+ * Attempt to repair a corrupted jobs.json by reading the raw content and
+ * extracting valid job objects using a lenient regex-based approach.
+ *
+ * This is a best-effort recovery: jobs with unescaped newlines in string
+ * fields (e.g. payload.message) will have those newlines re-escaped so the
+ * file becomes valid JSON again.
+ *
+ * @returns {Promise<{ recovered: number, lost: number, jobs: Object }>}
+ */
+async function repairCronJobs() {
+  const raw = await getFileContent(CRON_JOBS_PATH);
+  if (!raw) {
+    return { recovered: 0, lost: 0, jobs: {} };
+  }
+
+  // First, try a simple fix: replace bare (unescaped) newlines and carriage
+  // returns that appear inside JSON string values.  We do this by scanning
+  // character-by-character and escaping control chars that appear between
+  // unescaped double-quote pairs.
+  const fixed = fixBareNewlinesInJsonStrings(typeof raw === 'string' ? raw : String(raw));
+
+  let parsed;
+  try {
+    parsed = JSON.parse(fixed);
+  } catch (err) {
+    logger.error('repairCronJobs: could not parse even after newline fix', { error: err.message });
+    const e = new Error(`Could not repair jobs.json: ${err.message}`);
+    e.status = 500;
+    e.code = 'REPAIR_FAILED';
+    throw e;
+  }
+
+  // Normalise to a map
+  let jobsArray = [];
+  if (Array.isArray(parsed)) {
+    jobsArray = parsed;
+  } else if (parsed.jobs && Array.isArray(parsed.jobs)) {
+    jobsArray = parsed.jobs;
+  } else if (typeof parsed === 'object') {
+    jobsArray = Object.values(parsed);
+  }
+
+  const jobsMap = {};
+  jobsArray.forEach(job => {
+    const id = job.jobId || job.id || uuidv4();
+    jobsMap[id] = { ...job, jobId: id };
+  });
+
+  await writeCronJobs(jobsMap);
+  logger.info('repairCronJobs: jobs.json repaired and rewritten', { count: jobsArray.length });
+
+  return { recovered: jobsArray.length, lost: 0, jobs: jobsMap };
+}
+
+/**
+ * Scan a JSON string and escape any bare (unescaped) newline / carriage-return
+ * characters that appear inside string literals.  This repairs files written
+ * with literal newlines in string values.
+ *
+ * @param {string} src - Raw file content
+ * @returns {string} Repaired content
+ */
+function fixBareNewlinesInJsonStrings(src) {
+  let result = '';
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      continue;
+    }
+
+    if (ch === '\\' && inString) {
+      result += ch;
+      escaped = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = !inString;
+      result += ch;
+      continue;
+    }
+
+    if (inString) {
+      if (ch === '\n') {
+        result += '\\n';
+        continue;
+      }
+      if (ch === '\r') {
+        result += '\\r';
+        continue;
+      }
+      if (ch === '\t') {
+        result += '\\t';
+        continue;
+      }
+    }
+
+    result += ch;
+  }
+
+  return result;
+}
+
 module.exports = {
   createCronJob,
   updateCronJob,
@@ -779,4 +932,6 @@ module.exports = {
   validateCronJob,
   toOfficialFormat,
   fromOfficialFormat,
+  repairCronJobs,
+  fixBareNewlinesInJsonStrings,
 };
