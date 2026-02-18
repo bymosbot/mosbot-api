@@ -958,64 +958,115 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
   try {
     logger.info('Fetching active sessions from OpenClaw Gateway', { userId: req.user.id });
     
-    const { sessionsList } = require('../services/openclawGatewayClient');
-    
-    // Get list of agent IDs to query
-    // Try to read from OpenClaw config, fallback to common agent IDs
-    let agentIds = ['main', 'coo', 'cto', 'cmo', 'cpo'];
-    
+    const { sessionsListAllViaWs, sessionsList, gatewayWsRpc } = require('../services/openclawGatewayClient');
+
+    // Primary: use the gateway's native WebSocket RPC sessions.list which has global
+    // visibility across all agents, including subagent sessions (kind: subagent).
+    // The /tools/invoke sessions_list tool is scoped per-agent and cannot see subagents.
+    let sessions = [];
+    let usedWsFallback = false;
+
     try {
-      const data = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
-      const config = JSON.parse(data.content);
-      const agentsList = config?.agents?.list || [];
-      const configuredAgents = agentsList
-        .map(agent => agent.id);
-      
-      if (configuredAgents.length > 0) {
-        agentIds = ['main', ...configuredAgents];
-      }
-    } catch (configError) {
-      logger.warn('Could not read agent config, using default agent list', {
-        error: configError.message
+      const wsResult = await sessionsListAllViaWs({
+        includeGlobal: true,
+        includeUnknown: true,
+        activeMinutes: 0,
+        limit: 0,
       });
+      // sessions.list RPC returns { sessions: [...], count: N }
+      sessions = wsResult?.sessions || [];
+      logger.info('Sessions fetched via WebSocket RPC', { count: sessions.length });
+
+      // Enrich sessions with cost data from sessions.usage + usage.cost
+      if (sessions.length > 0) {
+        const today = new Date().toISOString().slice(0, 10);
+        try {
+          const [usageResult, costResult] = await Promise.all([
+            gatewayWsRpc('sessions.usage', { startDate: today, endDate: today, limit: 1000 }),
+            gatewayWsRpc('usage.cost', { startDate: today, endDate: today }),
+          ]);
+          // Per-session cost + token enrichment from sessions.usage
+          if (usageResult?.sessions) {
+            const usageMap = new Map();
+            for (const us of usageResult.sessions) {
+              const u = us.usage || {};
+              usageMap.set(us.key, {
+                totalCost: u.totalCost || 0,
+                input: u.input || 0,
+                output: u.output || 0,
+                cacheRead: u.cacheRead || 0,
+                cacheWrite: u.cacheWrite || 0,
+              });
+            }
+            for (const s of sessions) {
+              if (s.key && usageMap.has(s.key)) {
+                const ud = usageMap.get(s.key);
+                s._totalCost = ud.totalCost;
+                s._usageInput = ud.input;
+                s._usageOutput = ud.output;
+                s._cacheRead = ud.cacheRead;
+                s._cacheWrite = ud.cacheWrite;
+              }
+            }
+          }
+          // Store aggregate daily cost for the response
+          sessions._dailyCost = costResult?.totals?.totalCost || 0;
+        } catch (costErr) {
+          logger.warn('Failed to fetch session cost data', { error: costErr.message });
+        }
+      }
+    } catch (wsErr) {
+      logger.warn('WebSocket sessions.list failed, falling back to per-agent tool invocation', {
+        error: wsErr.message
+      });
+      usedWsFallback = true;
     }
-    
-    // Query sessions from each agent using the full agent session key format.
-    // The sessionKey in /tools/invoke must be the full key (e.g., "agent:coo:main")
-    // to run the tool in that agent's context and see that agent's session store.
-    // We request ALL session kinds (main, cron, hook, group, node, subagent, other) so that
-    // cron-triggered sessions, hook sessions, and subagent sessions are included alongside regular ones.
-    const ALL_SESSION_KINDS = ['main', 'group', 'cron', 'hook', 'node', 'subagent', 'other'];
-    
-    const sessionPromises = agentIds.map(agentId => {
-      // Use the full session key format: "agent:<agentId>:main" for non-main agents
-      // For the "main" agent, just use "main" (the default)
-      const sessionKey = agentId === 'main' ? 'main' : `agent:${agentId}:main`;
-      
-      return sessionsList({
-        sessionKey,
-        kinds: ALL_SESSION_KINDS,
-        limit: 500,
-        messageLimit: 1 // Include last message per session
-      }).then(sessions => sessions)
-      .catch(err => {
-        logger.warn('Failed to fetch sessions for agent', { agentId, sessionKey, error: err.message });
-        return [];
-      });
-    });
-    
-    const sessionArrays = await Promise.all(sessionPromises);
-    const allSessions = sessionArrays.flat();
-    
-    // Deduplicate by sessionId (agents may share some sessions)
-    const sessionMap = new Map();
-    allSessions.forEach(session => {
-      const sessionId = session.sessionId || session.id;
-      if (sessionId && !sessionMap.has(sessionId)) {
-        sessionMap.set(sessionId, session);
+
+    // Fallback: per-agent sessions_list tool invocation (does not include subagent sessions)
+    if (usedWsFallback) {
+      let agentIds = ['main', 'coo', 'cto', 'cmo', 'cpo'];
+      try {
+        const data = await makeOpenClawRequest('GET', '/files/content?path=/openclaw.json');
+        const config = JSON.parse(data.content);
+        const agentsList = config?.agents?.list || [];
+        const configuredAgents = agentsList.map(agent => agent.id);
+        if (configuredAgents.length > 0) {
+          agentIds = ['main', ...configuredAgents];
+        }
+      } catch (configError) {
+        logger.warn('Could not read agent config, using default agent list', {
+          error: configError.message
+        });
       }
-    });
-    const sessions = Array.from(sessionMap.values());
+
+      const ALL_SESSION_KINDS = ['main', 'group', 'cron', 'hook', 'node', 'subagent', 'other'];
+      const sessionPromises = agentIds.map(agentId => {
+        const sessionKey = agentId === 'main' ? 'main' : `agent:${agentId}:main`;
+        return sessionsList({
+          sessionKey,
+          kinds: ALL_SESSION_KINDS,
+          limit: 500,
+          messageLimit: 1,
+        }).catch(err => {
+          logger.warn('Failed to fetch sessions for agent', { agentId, sessionKey, error: err.message });
+          return [];
+        });
+      });
+
+      const sessionArrays = await Promise.all(sessionPromises);
+      const allSessions = sessionArrays.flat();
+      const sessionMap = new Map();
+      allSessions.forEach(session => {
+        const sessionId = session.sessionId || session.id;
+        if (sessionId && !sessionMap.has(sessionId)) sessionMap.set(sessionId, session);
+      });
+      sessions = Array.from(sessionMap.values());
+    }
+
+    // When using WebSocket RPC, sessions don't include message history.
+    // Fetch last message for each session via sessions_list tool (per-session).
+    // For now, sessions from WS RPC won't have message data — the transform below
+    // handles missing message data gracefully (model/tokens fall back to session-level fields).
     
     logger.info('Sessions received from OpenClaw Gateway', { 
       userId: req.user.id,
@@ -1057,25 +1108,32 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
         status = 'idle';     // Not recently active
       }
       
-      // Extract the actual model used from the last message (not the session default)
-      // session.model is the session default (often claude-opus-4-6)
-      // messages[0].model or messages[0].provider/model has the actual model used
+      // Extract the actual model used.
+      // WS RPC sessions have modelProvider + model directly on the session object.
+      // Tool-invocation sessions have model on the last message.
       const lastMessage = session.messages?.[0] || null;
       let actualModel = null;
-      if (lastMessage?.provider && lastMessage?.model) {
+      if (session.modelProvider && session.model) {
+        // WS RPC shape: modelProvider="openrouter", model="anthropic/claude-sonnet-4.5"
+        actualModel = `${session.modelProvider}/${session.model}`;
+      } else if (lastMessage?.provider && lastMessage?.model) {
         actualModel = `${lastMessage.provider}/${lastMessage.model}`;
       } else if (lastMessage?.model) {
-        // Message model is in format "moonshotai/kimi-k2.5" (provider/model from API)
         actualModel = lastMessage.model;
+      } else if (session.model) {
+        actualModel = session.model;
       }
-      // Only use actual model from message; do not fall back to session default
       const model = actualModel || null;
       
-      // Extract token usage from last message
+      // Extract token usage.
+      // Prefer enriched data from sessions.usage RPC (_usage* fields),
+      // fall back to session-level fields from sessions.list, then last message usage.
       const usage = lastMessage?.usage || {};
-      const inputTokens = (usage.input || 0) + (usage.cacheRead || 0);
-      const outputTokens = usage.output || 0;
-      const messageCost = usage.cost?.total || 0;
+      const inputTokens = session._usageInput || session.inputTokens || ((usage.input || 0) + (usage.cacheRead || 0));
+      const outputTokens = session._usageOutput || session.outputTokens || (usage.output || 0);
+      const cacheReadTokens = session._cacheRead || usage.cacheRead || 0;
+      const cacheWriteTokens = session._cacheWrite || usage.cacheWrite || 0;
+      const messageCost = session._totalCost || usage.cost?.total || 0;
       
       // Context window usage
       const contextTokens = session.contextTokens || 0; // Total context window size
@@ -1114,12 +1172,24 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
         lastMessageText = 'HEARTBEAT_OK';
       }
       
+      // Derive semantic kind from session key when WS RPC returns generic "direct".
+      // Session key format: "agent:<agentId>:<kind>[:<uuid>]" or "main"
+      // WS RPC returns kind="direct" for all sessions; infer from key structure.
+      let kind = session.kind || 'main';
+      if (kind === 'direct' && session.key) {
+        const keyParts = session.key.split(':');
+        if (keyParts[0] === 'agent' && keyParts.length >= 3) {
+          const keyKind = keyParts[2]; // e.g. "main", "cron", "subagent", "hook"
+          if (keyKind) kind = keyKind;
+        }
+      }
+
       return {
         id: session.sessionId || session.id,
         key: session.key || null,
         label: session.displayName || session.sessionLabel || session.sessionId || session.id,
         status,
-        kind: session.kind || 'main',
+        kind,
         updatedAt: updatedAtMs || null,
         agent: agentName,
         model,
@@ -1129,6 +1199,8 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
         contextUsagePercent,
         inputTokens,
         outputTokens,
+        cacheReadTokens,
+        cacheWriteTokens,
         messageCost,
         // Last message
         lastMessage: lastMessageText,
@@ -1171,7 +1243,8 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
     });
     
     res.json({
-      data: enrichedSessions
+      data: enrichedSessions,
+      dailyCost: sessions._dailyCost || 0,
     });
   } catch (error) {
     // If OpenClaw Gateway is not configured, return empty array
@@ -1207,69 +1280,81 @@ router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) 
       });
     }
     
-    const { sessionsHistory, sessionsList } = require('../services/openclawGatewayClient');
+    const { sessionsHistory, sessionsHistoryViaWs, sessionsList } = require('../services/openclawGatewayClient');
     
-    // Fetch full message history
-    const historyResult = await sessionsHistory({
-      sessionKey,
-      limit: parseInt(limit, 10),
-      includeTools: includeTools === 'true' || includeTools === true
-    });
-    
-    // Log raw result for debugging empty sessions with usage data
-    logger.debug('sessionsHistory raw result', {
-      sessionKey,
-      resultType: Array.isArray(historyResult) ? 'array' : typeof historyResult,
-      resultKeys: historyResult && typeof historyResult === 'object' ? Object.keys(historyResult) : null,
-      isNull: historyResult === null,
-      isUndefined: historyResult === undefined
-    });
-    
-    // Check for forbidden response (agent-to-agent access disabled)
-    if (historyResult?.details?.status === 'forbidden') {
-      logger.warn('Agent-to-agent history access forbidden', {
-        sessionKey,
-        error: historyResult.details.error
-      });
-      
-      return res.status(403).json({
-        error: {
-          message: 'Agent session history is not accessible. Agent-to-agent access is disabled in OpenClaw Gateway.',
-          code: 'AGENT_TO_AGENT_DISABLED',
-          hint: 'Enable agent-to-agent access by setting tools.agentToAgent.enabled=true in OpenClaw Gateway configuration',
-          details: historyResult.details
-        }
-      });
-    }
-    
-    // Ensure we have an array of messages
-    // sessionsHistory may return different structures:
-    // - Direct array: [...]
-    // - { messages: [...] }
-    // - { details: { messages: [...] } }
+    const parsedLimit = parseInt(limit, 10);
     let messages = [];
-    if (Array.isArray(historyResult)) {
-      messages = historyResult;
-    } else if (historyResult && Array.isArray(historyResult.messages)) {
-      messages = historyResult.messages;
-    } else if (historyResult && historyResult.details && Array.isArray(historyResult.details.messages)) {
-      messages = historyResult.details.messages;
-    } else if (historyResult && typeof historyResult === 'object') {
-      logger.warn('Unexpected sessionsHistory result structure', { 
+    let usedWsFallback = false;
+
+    // Try WebSocket RPC first (chat.history) — bypasses tool visibility restrictions
+    try {
+      const wsResult = await sessionsHistoryViaWs({ sessionKey, limit: parsedLimit || 200 });
+      messages = Array.isArray(wsResult?.messages) ? wsResult.messages : [];
+      logger.info('Session history fetched via WebSocket RPC', {
         sessionKey,
-        result: historyResult,
-        resultKeys: Object.keys(historyResult)
+        messageCount: messages.length
       });
-      messages = [];
+    } catch (wsErr) {
+      logger.warn('WebSocket chat.history failed, falling back to tool invocation', {
+        sessionKey,
+        error: wsErr.message
+      });
+      usedWsFallback = true;
     }
-    
-    logger.info('Session history loaded', { 
+
+    // Fallback: use sessions_history tool via /tools/invoke
+    if (usedWsFallback) {
+      const historyResult = await sessionsHistory({
+        sessionKey,
+        limit: parsedLimit,
+        includeTools: includeTools === 'true' || includeTools === true
+      });
+
+      logger.debug('sessionsHistory raw result', {
+        sessionKey,
+        resultType: Array.isArray(historyResult) ? 'array' : typeof historyResult,
+        resultKeys: historyResult && typeof historyResult === 'object' ? Object.keys(historyResult) : null,
+        isNull: historyResult === null,
+        isUndefined: historyResult === undefined
+      });
+
+      if (historyResult?.details?.status === 'forbidden') {
+        logger.warn('Agent-to-agent history access forbidden', {
+          sessionKey,
+          error: historyResult.details.error
+        });
+
+        return res.status(403).json({
+          error: {
+            message: 'Agent session history is not accessible. Agent-to-agent access is disabled in OpenClaw Gateway.',
+            code: 'AGENT_TO_AGENT_DISABLED',
+            hint: 'Enable agent-to-agent access by setting tools.agentToAgent.enabled=true in OpenClaw Gateway configuration',
+            details: historyResult.details
+          }
+        });
+      }
+
+      if (Array.isArray(historyResult)) {
+        messages = historyResult;
+      } else if (historyResult && Array.isArray(historyResult.messages)) {
+        messages = historyResult.messages;
+      } else if (historyResult && historyResult.details && Array.isArray(historyResult.details.messages)) {
+        messages = historyResult.details.messages;
+      } else if (historyResult && typeof historyResult === 'object') {
+        logger.warn('Unexpected sessionsHistory result structure', {
+          sessionKey,
+          result: historyResult,
+          resultKeys: Object.keys(historyResult)
+        });
+        messages = [];
+      }
+    }
+
+    logger.info('Session history loaded', {
       userId: req.user.id,
       sessionKey,
       messageCount: messages.length,
-      rawMessageCount: Array.isArray(historyResult) ? historyResult.length : 
-                       historyResult?.messages?.length || 
-                       historyResult?.details?.messages?.length || 0
+      source: usedWsFallback ? 'tool' : 'websocket'
     });
     
     // Also fetch session metadata to include in response
@@ -1557,135 +1642,99 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
       return job;
     });
 
-    // Query cron sessions from OpenClaw to get actual execution data
-    // (tokens, cost, model used, last message) instead of proxying from agent main sessions
-    const { sessionsList } = require('../services/openclawGatewayClient');
-    
-    // Get unique agent IDs that have cron jobs (not heartbeat jobs, which use main sessions)
-    const cronJobAgentIds = [...new Set(
-      enrichedJobs
-        .filter(j => j.source === 'gateway')
-        .map(j => j.agentId)
-        .filter(Boolean)
-    )];
+    // Fetch session metadata (model, contextTokens) and detailed usage data
+    // (tokens, cache, cost) via WebSocket RPC.
+    // Cron session keys: parent = agent:{agentId}:cron:{jobId}
+    //                    runs  = agent:{agentId}:cron:{jobId}:run:{runId}
+    const { gatewayWsRpc } = require('../services/openclawGatewayClient');
 
-    // Query ALL sessions for each agent, then filter to cron kind in-memory
-    // OpenClaw's sessions_list with kinds: ['cron'] returns empty, but querying all
-    // sessions may include cron sessions tagged with kind: 'cron'
-    let cronSessionsByAgent = new Map();
-    if (cronJobAgentIds.length > 0) {
-      try {
-        const cronSessionPromises = cronJobAgentIds.map(async agentId => {
-          const sessionKey = agentId === 'main' ? 'main' : `agent:${agentId}:main`;
-          try {
-            const allSessions = await sessionsList({
-              sessionKey,
-              // Don't filter by kinds — get all sessions and filter in-memory
-              limit: 500,
-              messageLimit: 1 // Include last message for usage data
-            });
-            // Filter to cron sessions (kind === 'cron' or key contains ':cron:')
-            const cronSessions = allSessions.filter(s => 
-              s.kind === 'cron' || (s.key && s.key.includes(':cron:'))
-            );
-            return { agentId, sessions: cronSessions };
-          } catch (err) {
-            logger.warn('Failed to fetch sessions for cron matching', { agentId, error: err.message });
-            return { agentId, sessions: [] };
-          }
-        });
+    let cronSessionMap = new Map();
+    // cronUsageByParent: parentKey -> { latest run usage, aggregate cost }
+    let cronUsageByParent = new Map();
+    try {
+      const [sessionsResult, usageResult] = await Promise.all([
+        gatewayWsRpc('sessions.list', { includeUnknown: true, limit: 500 }),
+        gatewayWsRpc('sessions.usage', {
+          startDate: new Date().toISOString().slice(0, 10),
+          endDate: new Date().toISOString().slice(0, 10),
+          limit: 2000,
+        }).catch(err => {
+          logger.warn('Failed to fetch cron session usage', { error: err.message });
+          return { sessions: [] };
+        }),
+      ]);
 
-        const cronSessionResults = await Promise.all(cronSessionPromises);
-        cronSessionResults.forEach(({ agentId, sessions }) => {
-          cronSessionsByAgent.set(agentId, sessions);
-        });
-
-        const totalCronSessions = Array.from(cronSessionsByAgent.values()).flat().length;
-        logger.info('Cron sessions fetched', {
-          agentCount: cronJobAgentIds.length,
-          totalSessions: totalCronSessions
-        });
-
-        // Log sample cron session if found
-        if (totalCronSessions > 0) {
-          const firstCronSession = Array.from(cronSessionsByAgent.values()).flat()[0];
-          logger.info('Sample cron session', {
-            key: firstCronSession.key,
-            kind: firstCronSession.kind,
-            updatedAt: firstCronSession.updatedAt,
-            hasMessages: (firstCronSession.messages || []).length > 0
-          });
+      const allSessions = sessionsResult?.sessions || [];
+      allSessions.forEach(s => {
+        if (s.key && s.key.includes(':cron:')) {
+          cronSessionMap.set(s.key, s);
         }
-      } catch (cronSessionErr) {
-        logger.warn('Failed to query sessions for cron matching, execution data will be unavailable', {
-          error: cronSessionErr.message
-        });
+      });
+
+      // Group usage entries by parent cron key and aggregate.
+      // Each :run: entry has full token/cache/cost breakdown in usage.
+      for (const entry of (usageResult?.sessions || [])) {
+        if (!entry.key || !entry.key.includes(':cron:')) continue;
+        const runIdx = entry.key.indexOf(':run:');
+        const parentKey = runIdx !== -1 ? entry.key.slice(0, runIdx) : entry.key;
+        const u = entry.usage || {};
+
+        let agg = cronUsageByParent.get(parentKey);
+        if (!agg) {
+          agg = {
+            totalCost: 0,
+            latestRun: null,
+            latestActivity: 0,
+          };
+          cronUsageByParent.set(parentKey, agg);
+        }
+
+        agg.totalCost += u.totalCost || 0;
+
+        const activity = u.lastActivity || 0;
+        if (activity > agg.latestActivity) {
+          agg.latestActivity = activity;
+          agg.latestRun = u;
+        }
       }
+
+      logger.info('Cron sessions fetched via WebSocket RPC', {
+        totalSessions: allSessions.length,
+        cronSessions: cronSessionMap.size,
+        cronUsageEntries: cronUsageByParent.size,
+      });
+    } catch (wsErr) {
+      logger.warn('Failed to fetch sessions via WebSocket for cron matching', {
+        error: wsErr.message,
+      });
     }
 
-    // Merge execution data from cron sessions into each cron job
-    // Note: OpenClaw runs cron jobs in isolated sessions that are not exposed via sessions_list,
-    // so we provide basic state data from jobs.json and null for detailed metrics.
+    // Merge execution data from cron sessions into each cron job.
+    // Session key is constructed as agent:{agentId}:cron:{jobId}.
     const jobsWithExecutionData = enrichedJobs.map(job => {
-      // Only enrich gateway cron jobs; heartbeats use main sessions
       if (job.source !== 'gateway' || !job.agentId) {
         return job;
       }
 
-      const agentCronSessions = cronSessionsByAgent.get(job.agentId) || [];
+      const jobId = job.jobId || job.id;
+      const expectedKey = `agent:${job.agentId}:cron:${jobId}`;
+      const matchedSession = cronSessionMap.get(expectedKey);
+      const usageAgg = cronUsageByParent.get(expectedKey);
+      const latestRun = usageAgg?.latestRun;
       const jobLastRunMs = job.state?.lastRunAtMs;
-      
-      // Attempt to match a cron session by timestamp proximity (may be empty)
-      let bestMatch = null;
-      let bestMatchDelta = Infinity;
 
-      if (agentCronSessions.length > 0 && jobLastRunMs) {
-        agentCronSessions.forEach(session => {
-          const sessionUpdatedAt = toUpdatedAtMs(session.updatedAt ?? session.updated_at);
-          const delta = Math.abs(sessionUpdatedAt - jobLastRunMs);
-          // Allow up to 5 minute drift for matching
-          if (delta < 5 * 60 * 1000 && delta < bestMatchDelta) {
-            bestMatch = session;
-            bestMatchDelta = delta;
-          }
-        });
-      }
-
-      if (bestMatch) {
-        // Extract execution data from the matched session
-        const lastMessage = bestMatch.messages?.[0] || null;
-        const usage = lastMessage?.usage || {};
-        const inputTokens = (usage.input || 0) + (usage.cacheRead || 0);
-        const outputTokens = usage.output || 0;
-        const messageCost = usage.cost?.total || 0;
-
-        // Extract model from message
-        let actualModel = null;
-        if (lastMessage?.provider && lastMessage?.model) {
-          actualModel = `${lastMessage.provider}/${lastMessage.model}`;
-        } else if (lastMessage?.model) {
-          actualModel = lastMessage.model;
-        }
-
-        // Extract last message text
-        let lastMessageText = null;
-        if (lastMessage?.content) {
-          if (typeof lastMessage.content === 'string') {
-            lastMessageText = lastMessage.content;
-          } else if (Array.isArray(lastMessage.content)) {
-            const textBlock = lastMessage.content.find(c => c.type === 'text');
-            lastMessageText = textBlock?.text || null;
-          }
-        }
-        if (lastMessageText && lastMessageText.length > 200) {
-          lastMessageText = lastMessageText.substring(0, 200) + '...';
-        }
-
-        // Context window
-        const contextTokens = bestMatch.contextTokens || 0;
-        const totalTokensUsed = bestMatch.totalTokens || 0;
-        const contextUsagePercent = contextTokens > 0 
-          ? Math.round((totalTokensUsed / contextTokens) * 100 * 10) / 10 
+      if (matchedSession || latestRun) {
+        const inputTokens = latestRun?.input ?? matchedSession?.inputTokens ?? 0;
+        const outputTokens = latestRun?.output ?? matchedSession?.outputTokens ?? 0;
+        const cacheReadTokens = latestRun?.cacheRead ?? 0;
+        const cacheWriteTokens = latestRun?.cacheWrite ?? 0;
+        const messageCost = latestRun?.totalCost ?? 0;
+        const todayTotalCost = usageAgg?.totalCost ?? 0;
+        const actualModel = matchedSession?.model || null;
+        const contextTokens = matchedSession?.contextTokens || 0;
+        const totalTokensUsed = latestRun?.totalTokens ?? matchedSession?.totalTokens ?? 0;
+        const contextUsagePercent = contextTokens > 0
+          ? Math.round((totalTokensUsed / contextTokens) * 100 * 10) / 10
           : 0;
 
         return {
@@ -1693,37 +1742,43 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
           lastExecution: {
             inputTokens,
             outputTokens,
+            cacheReadTokens,
+            cacheWriteTokens,
             messageCost,
+            todayTotalCost,
             model: actualModel,
-            lastMessage: lastMessageText,
-            updatedAt: toUpdatedAtMs(bestMatch.updatedAt ?? bestMatch.updated_at) || null,
+            lastMessage: null,
+            updatedAt: toUpdatedAtMs(matchedSession?.updatedAt ?? matchedSession?.updated_at) || jobLastRunMs || null,
             contextTokens,
             totalTokensUsed,
             contextUsagePercent,
-            sessionKey: bestMatch.key || null,
-          }
+            sessionKey: expectedKey,
+          },
         };
       }
 
-      // No session match found — provide basic state data from jobs.json
-      // Include a flag indicating that detailed metrics are unavailable
+      // No session or usage data — still provide the constructed key so the
+      // detail panel can attempt to load messages via chat.history.
       return {
         ...job,
         lastExecution: {
           inputTokens: null,
           outputTokens: null,
+          cacheReadTokens: null,
+          cacheWriteTokens: null,
           messageCost: null,
+          todayTotalCost: null,
           model: null,
           lastMessage: null,
           updatedAt: jobLastRunMs || null,
           contextTokens: null,
           totalTokensUsed: null,
           contextUsagePercent: null,
-          sessionKey: null,
+          sessionKey: expectedKey,
           durationMs: job.state?.lastDurationMs || null,
           status: job.state?.lastStatus || null,
-          unavailable: true, // Flag indicating session data is not accessible
-        }
+          unavailable: true,
+        },
       };
     });
 

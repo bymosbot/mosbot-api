@@ -14,7 +14,12 @@
     "lint:fix": "eslint src/ --fix",
     "lint:check": "eslint src/ --max-warnings 0"
   },
-  "keywords": ["mosbot", "task-management", "api", "self-hosted"],
+  "keywords": [
+    "mosbot",
+    "task-management",
+    "api",
+    "self-hosted"
+  ],
   "author": "MosBot",
   "license": "MIT",
   "dependencies": {
@@ -26,7 +31,8 @@
     "helmet": "^7.1.0",
     "jsonwebtoken": "^9.0.2",
     "pg": "^8.11.3",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "ws": "^8.19.0"
   },
   "devDependencies": {
     "eslint": "^9.39.2",
