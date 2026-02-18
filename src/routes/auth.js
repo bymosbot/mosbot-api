@@ -306,6 +306,17 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
+// Middleware to require admin or owner only (for user create/update/delete; agents are excluded)
+const requireManageUsers = (req, res, next) => {
+  if (!req.user || !['admin', 'owner'].includes(req.user.role)) {
+    return res.status(403).json({
+      error: { message: 'Admin or owner access required to manage users', status: 403 }
+    });
+  }
+  next();
+};
+
 module.exports = router;
 module.exports.authenticateToken = authenticateToken;
 module.exports.requireAdmin = requireAdmin;
+module.exports.requireManageUsers = requireManageUsers;

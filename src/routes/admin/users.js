@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../../db/pool');
 const bcrypt = require('bcrypt');
-const { authenticateToken, requireAdmin } = require('../auth');
+const { authenticateToken, requireManageUsers } = require('../auth');
 const logger = require('../../utils/logger');
 
 // Apply auth middleware to all routes
@@ -60,9 +60,9 @@ router.get('/', async (req, res, next) => {
           }
         });
         
-        // Merge agent config into user objects
+        // Merge agent config into user objects (agent or admin; admin can also have agent config)
         users = users.map(user => {
-          if (user.role === 'agent' && user.agent_id) {
+          if ((user.role === 'agent' || user.role === 'admin') && user.agent_id) {
             const agentConfig = agentConfigMap.get(user.agent_id);
             if (agentConfig) {
               return {
@@ -120,8 +120,8 @@ router.get('/:id', validateUUID('id'), async (req, res, next) => {
     
     let user = result.rows[0];
     
-    // If includeAgentConfig is requested and user is an agent, merge OpenClaw config
-    if (includeAgentConfig === 'true' && user.role === 'agent' && user.agent_id) {
+    // If includeAgentConfig is requested and user is an agent or admin with agent_id, merge OpenClaw config
+    if (includeAgentConfig === 'true' && (user.role === 'agent' || user.role === 'admin') && user.agent_id) {
       try {
         const { makeOpenClawRequest } = require('../../services/openclawWorkspaceClient');
         
@@ -163,7 +163,7 @@ router.get('/:id', validateUUID('id'), async (req, res, next) => {
 });
 
 // POST /api/v1/admin/users - Create a new user (admin/owner only)
-router.post('/', requireAdmin, async (req, res, next) => {
+router.post('/', requireManageUsers, async (req, res, next) => {
   try {
     const { name, email, password, role = 'user', avatar_url } = req.body;
     
@@ -221,7 +221,7 @@ router.post('/', requireAdmin, async (req, res, next) => {
 });
 
 // PUT /api/v1/admin/users/:id - Update a user (admin/owner only)
-router.put('/:id', requireAdmin, validateUUID('id'), async (req, res, next) => {
+router.put('/:id', requireManageUsers, validateUUID('id'), async (req, res, next) => {
   try {
     const { id } = req.params;
     const { name, email, password, role, avatar_url, active } = req.body;
@@ -419,7 +419,7 @@ router.put('/:id', requireAdmin, validateUUID('id'), async (req, res, next) => {
 });
 
 // PUT /api/v1/admin/users/:id/agent - Upsert agent configuration (owner/admin only)
-router.put('/:id/agent', requireAdmin, validateUUID('id'), async (req, res, next) => {
+router.put('/:id/agent', requireManageUsers, validateUUID('id'), async (req, res, next) => {
   try {
     const { id } = req.params;
     const { agentId, agentConfigPatch } = req.body;
@@ -438,11 +438,11 @@ router.put('/:id/agent', requireAdmin, validateUUID('id'), async (req, res, next
     
     const user = userResult.rows[0];
     
-    // User must have role='agent' to have agent config
-    if (user.role !== 'agent') {
+    // User must have role 'agent' or 'admin' to have agent config (an agent can also be an admin)
+    if (user.role !== 'agent' && user.role !== 'admin') {
       return res.status(400).json({
         error: { 
-          message: 'User must have role="agent" to configure agent settings',
+          message: 'User must have role "agent" or "admin" to configure agent settings',
           status: 400 
         }
       });
@@ -568,7 +568,6 @@ router.put('/:id/agent', requireAdmin, validateUUID('id'), async (req, res, next
       openclawConfig.meta = {};
     }
     openclawConfig.meta.lastTouchedAt = new Date().toISOString();
-    openclawConfig.meta.lastTouchedBy = req.user.email || req.user.id;
     
     // Write openclaw.json back
     try {
@@ -816,7 +815,7 @@ async function removeAgentFromConfig(agentId) {
 }
 
 // DELETE /api/v1/admin/users/:id - Delete a user (admin/owner only)
-router.delete('/:id', requireAdmin, validateUUID('id'), async (req, res, next) => {
+router.delete('/:id', requireManageUsers, validateUUID('id'), async (req, res, next) => {
   try {
     const { id } = req.params;
     

@@ -1905,6 +1905,71 @@ router.post('/cron-jobs/:jobId/trigger', requireAuth, requireAdmin, async (req, 
   }
 });
 
+// GET /api/v1/openclaw/cron-jobs/stats
+// Lightweight stats for attention badges (errors, missed) for any authenticated user
+router.get('/cron-jobs/stats', requireAuth, async (req, res, next) => {
+  try {
+    // Quick version: fetch gateway jobs and config jobs, normalize, get counts
+    logger.info('Fetching cron jobs stats for attention counts', { userId: req.user.id });
+    const { cronList } = require('../services/openclawGatewayClient');
+
+    // Fetch gateway cron jobs and config heartbeats in parallel
+    const gatewayJobsP = cronList().catch(err => {
+      logger.warn('Failed to fetch gateway jobs for stats', { error: err.message });
+      return [];
+    });
+    const configJobsP = getHeartbeatJobsFromConfig().catch(err => {
+      logger.warn('Failed to fetch config jobs for stats', { error: err.message });
+      return [];
+    });
+
+    let [gatewayJobs, configJobs] = await Promise.all([gatewayJobsP, configJobsP]);
+    if (!Array.isArray(gatewayJobs)) gatewayJobs = [];
+    if (!Array.isArray(configJobs)) configJobs = [];
+
+    // Normalize gateway jobs
+    const gatewayJobsNormalized = gatewayJobs.map((job) => {
+      let nextRunAt = null;
+      // Try to compute nextRunAt from cron/interval like full cron-jobs route (lightweight)
+      if (job.enabled !== false) {
+        if (job.cron || job.expression) {
+          try {
+            // Minimal cron parse to get next run
+            const expr = job.cron || job.expression;
+            const CronExpressionParser = require('cron-parser').CronExpressionParser; // cache hit or lazy load for this route
+            const parsed = new CronExpressionParser(expr);
+            const next = parsed.next();
+            nextRunAt = next.toISOString();
+          } catch (e) {
+            // fallback: no next run
+            nextRunAt = null;
+          }
+        }
+        if (!nextRunAt && (job.interval || job.every)) {
+          // For every/interval we can't compute a single next date without keeping state, so we skip.
+          nextRunAt = null;
+        }
+      }
+      return {
+        ...job,
+        nextRunAt,
+      };
+    });
+
+    const allJobs = [...gatewayJobsNormalized, ...configJobs.map(j => ({ ...j, nextRunAt: j.nextRunAt || null }))];
+    const now = new Date();
+
+    const errors = allJobs.filter(j => j.status === 'error').length;
+    const missed = allJobs.filter(
+      j => j.enabled !== false && j.nextRunAt && new Date(j.nextRunAt) < now
+    ).length;
+
+    res.json({ data: { errors, missed } });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // DELETE /api/v1/openclaw/cron-jobs/:jobId
 // Delete a gateway cron job (admin only)
 // Note: Heartbeat jobs cannot be deleted (they're defined in OpenClaw config)
