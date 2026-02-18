@@ -1,6 +1,7 @@
 const { v4: uuidv4 } = require('uuid');
 const logger = require('../utils/logger');
 const { getFileContent, putFileContent } = require('./openclawWorkspaceClient');
+const { parseJsonWithLiteralNewlines } = require('./openclawGatewayClient');
 
 const CRON_JOBS_PATH = '/cron/jobs.json';
 
@@ -141,6 +142,7 @@ async function readCronJobs() {
 
     const raw = typeof content === 'string' ? content : content.content || content;
     let parsed;
+    let wasRepaired = false;
     try {
       parsed = JSON.parse(raw);
     } catch (parseError) {
@@ -150,15 +152,11 @@ async function readCronJobs() {
         preview: typeof raw === 'string' ? raw.substring(0, 200) : String(raw).substring(0, 200),
       });
 
-      // Attempt to fix bare newlines inside JSON string values and retry
+      // Use the same lenient parser that cronList uses — handles markdown code
+      // blocks with unescaped quotes and bare newlines inside JSON strings.
       try {
-        const fixed = fixBareNewlinesInJsonStrings(typeof raw === 'string' ? raw : String(raw));
-        parsed = JSON.parse(fixed);
-        logger.info('jobs.json auto-repair succeeded — rewriting fixed content', { path: CRON_JOBS_PATH });
-        // Rewrite the fixed content so future reads don't need to repair again
-        putFileContent(CRON_JOBS_PATH, fixed).catch(writeErr => {
-          logger.warn('jobs.json auto-repair: could not rewrite fixed file', { error: writeErr.message });
-        });
+        parsed = parseJsonWithLiteralNewlines(typeof raw === 'string' ? raw : String(raw));
+        wasRepaired = true;
       } catch (repairError) {
         logger.error('jobs.json auto-repair failed', {
           path: CRON_JOBS_PATH,
@@ -172,28 +170,40 @@ async function readCronJobs() {
       }
     }
 
+    let jobsMap;
     if (Array.isArray(parsed)) {
-      const map = {};
+      jobsMap = {};
       parsed.forEach(job => {
         const id = job.jobId || job.id || uuidv4();
-        map[id] = { ...job, jobId: id };
+        jobsMap[id] = { ...job, jobId: id };
       });
-      return map;
-    }
-    
-    if (parsed.jobs) {
+    } else if (parsed.jobs) {
       if (Array.isArray(parsed.jobs)) {
-        const map = {};
+        jobsMap = {};
         parsed.jobs.forEach(job => {
           const id = job.jobId || job.id || uuidv4();
-          map[id] = { ...job, jobId: id };
+          jobsMap[id] = { ...job, jobId: id };
         });
-        return map;
+      } else {
+        jobsMap = parsed.jobs;
       }
-      return parsed.jobs;
+    } else {
+      jobsMap = parsed;
     }
-    
-    return parsed;
+
+    // If we repaired the file, rewrite it now with clean JSON so future reads
+    // don't need to repair again.
+    if (wasRepaired) {
+      logger.info('jobs.json auto-repair succeeded — rewriting with clean JSON', {
+        path: CRON_JOBS_PATH,
+        count: Object.keys(jobsMap).length,
+      });
+      writeCronJobs(jobsMap).catch(writeErr => {
+        logger.warn('jobs.json auto-repair: could not rewrite fixed file', { error: writeErr.message });
+      });
+    }
+
+    return jobsMap;
   } catch (error) {
     if (error.status === 404 || error.code === 'OPENCLAW_SERVICE_ERROR') {
       return {};
@@ -825,17 +835,11 @@ async function repairCronJobs() {
     return { recovered: 0, lost: 0, jobs: {} };
   }
 
-  // First, try a simple fix: replace bare (unescaped) newlines and carriage
-  // returns that appear inside JSON string values.  We do this by scanning
-  // character-by-character and escaping control chars that appear between
-  // unescaped double-quote pairs.
-  const fixed = fixBareNewlinesInJsonStrings(typeof raw === 'string' ? raw : String(raw));
-
   let parsed;
   try {
-    parsed = JSON.parse(fixed);
+    parsed = parseJsonWithLiteralNewlines(typeof raw === 'string' ? raw : String(raw));
   } catch (err) {
-    logger.error('repairCronJobs: could not parse even after newline fix', { error: err.message });
+    logger.error('repairCronJobs: could not parse even after lenient repair', { error: err.message });
     const e = new Error(`Could not repair jobs.json: ${err.message}`);
     e.status = 500;
     e.code = 'REPAIR_FAILED';

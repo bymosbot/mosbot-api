@@ -449,6 +449,7 @@ module.exports = {
   sessionsList,
   sessionsHistory,
   cronList,
+  parseJsonWithLiteralNewlines,
   sleep,
   isRetryableError
 };
