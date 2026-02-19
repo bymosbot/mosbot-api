@@ -1258,6 +1258,57 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
   }
 });
 
+// DELETE /api/v1/openclaw/sessions
+// Delete/terminate an OpenClaw session by session key (admin only)
+// Query param: key (required) - the full session key (e.g. agent:cpo:cron:daily-standup)
+// Calls OpenClaw Gateway sessions.delete RPC when supported.
+router.delete('/sessions', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const sessionKey = req.query.key;
+    if (!sessionKey || typeof sessionKey !== 'string') {
+      return res.status(400).json({
+        error: { message: 'Query parameter key (session key) is required', status: 400 }
+      });
+    }
+
+    logger.info('Deleting OpenClaw session', { userId: req.user.id, sessionKey });
+
+    const { gatewayWsRpc } = require('../services/openclawGatewayClient');
+
+    try {
+      await gatewayWsRpc('sessions.delete', { sessionKey });
+      logger.info('Session deleted via Gateway sessions.delete', { sessionKey });
+      return res.status(204).send();
+    } catch (rpcErr) {
+      const msg = (rpcErr?.message || '').toLowerCase();
+      if (msg.includes('method') || msg.includes('not found') || msg.includes('unknown')) {
+        logger.warn('Gateway does not support sessions.delete RPC', {
+          sessionKey,
+          error: rpcErr.message
+        });
+        return res.status(501).json({
+          error: {
+            message: 'Session deletion is not supported by the OpenClaw Gateway. The sessions.delete RPC may not be available in this Gateway version.',
+            status: 501,
+            code: 'NOT_IMPLEMENTED'
+          }
+        });
+      }
+      throw rpcErr;
+    }
+  } catch (error) {
+    if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
+      return res.status(503).json({
+        error: {
+          message: 'OpenClaw Gateway is not available',
+          status: 503
+        }
+      });
+    }
+    next(error);
+  }
+});
+
 // GET /api/v1/openclaw/sessions/:sessionId/messages
 // Get full message history for a specific session
 router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) => {

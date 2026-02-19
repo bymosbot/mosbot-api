@@ -80,6 +80,8 @@ This document describes the **public HTTP API contract** OpenClaw can use to int
   - [POST `/openclaw/cron-jobs/:jobId/run`](#post-openclawcron-jobsjobidrun)
   - [DELETE `/openclaw/cron-jobs/:jobId`](#delete-openclawcron-jobsjobid)
   - [POST `/openclaw/cron-jobs/repair`](#post-openclawcron-jobsrepair)
+- [OpenClaw Sessions](#openclaw-sessions)
+  - [DELETE `/openclaw/sessions`](#delete-openclawsessions)
 - [OpenClaw workspace integration](#openclaw-workspace-integration)
   - [GET `/openclaw/workspace/files`](#get-openclawworkspacefiles)
   - [GET `/openclaw/workspace/files/content`](#get-openclawworkspacefilescontent)
@@ -1848,6 +1850,37 @@ Errors:
 - `401` authentication required
 - `403` elevated role required
 - `500` repair failed (file is too corrupted to recover)
+
+---
+
+## OpenClaw Sessions
+
+### DELETE `/openclaw/sessions`
+
+Delete or terminate an OpenClaw session by session key. **Admin/owner/agent role required.**
+
+Calls the OpenClaw Gateway `sessions.delete` RPC when supported. If the Gateway version does not implement this RPC, returns `501 Not Implemented`.
+
+**Query parameters**:
+
+- `key` (required): Full session key (e.g. `agent:cpo:cron:daily-standup` or `agent:cto:main`)
+
+**Example**:
+
+```bash
+curl -X DELETE "https://api.example.com/api/v1/openclaw/sessions?key=agent%3Acpo%3Acron%3Adaily-standup" \
+  -H "Authorization: Bearer <token>"
+```
+
+Response `204` — No content on success.
+
+Errors:
+
+- `400` query parameter `key` missing or invalid
+- `401` authentication required
+- `403` elevated role required
+- `501` Gateway does not support `sessions.delete` RPC
+- `503` OpenClaw Gateway not available
 
 ---
 
