@@ -69,6 +69,17 @@ This document describes the **public HTTP API contract** OpenClaw can use to int
   - [GET `/standups/:id/messages`](#get-standupsidmessages)
   - [POST `/standups/:id/messages`](#post-standupsidmessages-admin)
   - [DELETE `/standups/:id/messages/:messageId`](#delete-standupsidmessagesmessageid-admin)
+- [Cron jobs (scheduler)](#cron-jobs-scheduler)
+  - [CronJob data model](#cronjob-data-model)
+  - [GET `/openclaw/cron-jobs`](#get-openclawcron-jobs)
+  - [GET `/openclaw/cron-jobs/stats`](#get-openclawcron-jobsstats)
+  - [GET `/openclaw/cron-jobs/:jobId`](#get-openclawcron-jobsjobid)
+  - [POST `/openclaw/cron-jobs`](#post-openclawcron-jobs)
+  - [PATCH `/openclaw/cron-jobs/:jobId`](#patch-openclawcron-jobsjobid)
+  - [PATCH `/openclaw/cron-jobs/:jobId/enabled`](#patch-openclawcron-jobsjobidenabled)
+  - [POST `/openclaw/cron-jobs/:jobId/run`](#post-openclawcron-jobsjobidrun)
+  - [DELETE `/openclaw/cron-jobs/:jobId`](#delete-openclawcron-jobsjobid)
+  - [POST `/openclaw/cron-jobs/repair`](#post-openclawcron-jobsrepair)
 - [OpenClaw workspace integration](#openclaw-workspace-integration)
   - [GET `/openclaw/workspace/files`](#get-openclawworkspacefiles)
   - [GET `/openclaw/workspace/files/content`](#get-openclawworkspacefilescontent)
@@ -153,8 +164,9 @@ Notes:
 
 ### IDs and timestamps
 
-- All IDs are **UUIDs** (string).
-- Timestamps are returned as ISO-like strings from PostgreSQL (treat as ISO 8601).
+- All IDs are **UUIDs** (string), except cron job IDs which are URL-safe slugs (see [CronJob data model](#cronjob-data-model)).
+- Task/user/standup timestamps are returned as ISO-like strings from PostgreSQL (treat as ISO 8601).
+- Cron job timestamps (`createdAtMs`, `updatedAtMs`, and all fields inside `state`) are **Unix epoch milliseconds** (integer) — consistent with `Date.now()` in JavaScript.
 
 ## Data model (public contract)
 
@@ -1459,6 +1471,386 @@ Errors:
 - `403` elevated role required
 - `404` message not found
 
+## Cron jobs (scheduler)
+
+Cron jobs are scheduled tasks that run inside the OpenClaw Gateway. They are stored in the agent's workspace at `/cron/jobs.json` and managed via these endpoints. The API proxies reads/writes through to the Gateway (using `cron.add`, `cron.update`, `cron.remove`, `cron.run` tools) and falls back to direct file writes when the Gateway is unavailable.
+
+**Authentication required** — all cron job endpoints require a valid JWT.
+
+**Authorization** — read endpoints (`GET`) are available to any authenticated user. Write endpoints (`POST`, `PATCH`, `DELETE`) require admin, owner, or agent role.
+
+**Job sources** — jobs have a `source` field:
+
+- `"gateway"` — managed via these endpoints, stored in `/cron/jobs.json`
+- `"config"` — heartbeat jobs defined in `openclaw.json` agent config; read-only via the list endpoint, editable only through the heartbeat config
+
+### CronJob data model
+
+```json
+{
+  "jobId": "daily-workspace-review",
+  "name": "Daily Workspace Review",
+  "description": "Runs a workspace review every morning",
+  "agentId": "coo",
+  "enabled": true,
+  "schedule": {
+    "kind": "cron",
+    "expr": "0 9 * * *",
+    "tz": "Asia/Singapore"
+  },
+  "sessionTarget": "isolated",
+  "wakeMode": "now",
+  "payload": {
+    "kind": "agentTurn",
+    "message": "Please review the workspace and summarise any blockers.",
+    "model": "openrouter/anthropic/claude-sonnet-4.5"
+  },
+  "delivery": {
+    "mode": "announce",
+    "channel": null,
+    "to": null
+  },
+  "createdAtMs": 1740000000000,
+  "updatedAtMs": 1740000000000,
+  "state": {
+    "nextRunAtMs": 1740032400000,
+    "lastRunAtMs": null,
+    "lastStatus": null,
+    "lastDurationMs": 0,
+    "consecutiveErrors": 0,
+    "lastError": null
+  }
+}
+```
+
+#### Field reference
+
+| Field | Type | Notes |
+| ----- | ---- | ----- |
+| `jobId` | `string` | URL-safe slug, unique. System-generated from the job name on creation (e.g. `"Daily Review"` → `"daily-review"`). Immutable after creation. |
+| `name` | `string` | Required. Human-readable name, max 200 chars. |
+| `description` | `string \| null` | Optional human-readable description. |
+| `agentId` | `"coo" \| "cto" \| "cpo" \| "cmo"` | Required. Which agent runs this job. |
+| `enabled` | `boolean` | Required. Defaults to `true` if omitted on create. |
+| `schedule.kind` | `"cron" \| "every" \| "at"` | Required. |
+| `schedule.expr` | `string` | Required when `kind=cron`. Standard 5- or 6-field cron expression. |
+| `schedule.tz` | `string` | Required when `kind=cron`. IANA timezone (e.g. `"Asia/Singapore"`). |
+| `schedule.everyMs` | `number` | Required when `kind=every`. Interval in milliseconds. |
+| `schedule.anchorMs` | `number` | Optional when `kind=every`. Epoch ms anchor for interval alignment. |
+| `sessionTarget` | `"main" \| "isolated"` | Required. `isolated` is required when `payload.kind=agentTurn`. |
+| `wakeMode` | `"now" \| "next-heartbeat"` | Required. `now` fires at the scheduled time; `next-heartbeat` defers to the agent's next heartbeat cycle. |
+| `payload.kind` | `"agentTurn" \| "systemEvent"` | Required. |
+| `payload.message` | `string` | Required when `payload.kind=agentTurn`. The prompt sent to the agent. |
+| `payload.model` | `string` | Required when `payload.kind=agentTurn`. Model ID (use `id` from `GET /models`). |
+| `payload.text` | `string` | Required when `payload.kind=systemEvent`. The system event text. |
+| `delivery.mode` | `"none" \| "announce"` | Optional. `announce` sends a summary to configured channels; `none` runs silently. |
+| `delivery.channel` | `string \| null` | Optional channel override. |
+| `delivery.to` | `string \| null` | Optional recipient override. |
+| `createdAtMs` | `number` | Unix epoch ms. Set on creation, immutable. |
+| `updatedAtMs` | `number` | Unix epoch ms. Updated on every write. |
+| `state` | `object` | **Read-only for clients.** Managed by the scheduler. |
+| `state.nextRunAtMs` | `number \| null` | When the job will next fire. |
+| `state.lastRunAtMs` | `number \| null` | When the job last fired. |
+| `state.lastStatus` | `"ok" \| "error" \| null` | Outcome of the last run. |
+| `state.lastDurationMs` | `number` | Duration of the last run in ms. |
+| `state.consecutiveErrors` | `number` | Count of consecutive failed runs. |
+| `state.lastError` | `string \| null` | Error message from the last failed run. |
+
+#### Validation rules
+
+| Rule | Description |
+| ---- | ----------- |
+| `agentId` | Must be one of: `coo`, `cto`, `cpo`, `cmo` |
+| `sessionTarget` | `"isolated"` required when `payload.kind=agentTurn` |
+| `sessionTarget` | `"main"` allowed when `payload.kind=systemEvent` |
+| `wakeMode` | Required; must be `"now"` or `"next-heartbeat"` |
+| `payload.model` | Required when `payload.kind=agentTurn` |
+| `schedule.tz` | Required when `schedule.kind=cron` |
+| `enabled` | Defaults to `true` if omitted on create |
+| `jobId` | Immutable after creation; cannot be changed via PATCH |
+| `createdAtMs` | Immutable after creation; cannot be changed via PATCH |
+| `state` | Read-only; ignored if sent in PATCH body |
+
+#### jobId generation
+
+When creating a job, `jobId` is **system-generated** from the job name:
+
+- `"Daily Workspace Review"` → `"daily-workspace-review"`
+- `"COO: Morning Brief (v2)"` → `"coo-morning-brief-v2"`
+- If the slug already exists, a numeric suffix is appended: `"daily-workspace-review-2"`
+- Maximum 64 characters; falls back to a UUID only if the name produces an empty slug after normalization
+
+You may supply a `jobId` in the POST body to override the auto-generated slug, but it must be URL-safe and unique.
+
+---
+
+### GET `/openclaw/cron-jobs`
+
+List all cron jobs — both gateway-managed jobs from `/cron/jobs.json` and heartbeat jobs from `openclaw.json` agent config.
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "version": 1,
+    "jobs": [/* CronJob[] */]
+  }
+}
+```
+
+The response also includes enriched display fields (not stored in `jobs.json`):
+
+- `source` — `"gateway"` or `"config"`
+- `agentName` — display name from the users table
+- `agentTitle` — agent title from `openclaw.json`
+- `agentModel` — agent's default model from `openclaw.json`
+- `lastExecution` — session usage data (tokens, cost, model) from the Gateway WebSocket RPC
+
+Errors:
+
+- `401` authentication required
+- `503` OpenClaw service not configured or unavailable (returns empty list gracefully)
+
+---
+
+### GET `/openclaw/cron-jobs/stats`
+
+Lightweight stats for attention badges. Returns error and missed-run counts without full job enrichment.
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "errors": 1,
+    "missed": 2
+  }
+}
+```
+
+- `errors` — jobs whose `state.lastStatus` is `"error"`
+- `missed` — enabled jobs whose `state.nextRunAtMs` is in the past
+
+Errors:
+
+- `401` authentication required
+
+---
+
+### GET `/openclaw/cron-jobs/:jobId`
+
+Fetch a single cron job by ID (gateway jobs only; heartbeat jobs are not individually addressable).
+
+Response `200`:
+
+```json
+{ "data": { /* CronJob */ } }
+```
+
+Errors:
+
+- `401` authentication required
+- `404` job not found
+
+---
+
+### POST `/openclaw/cron-jobs`
+
+Create a new gateway cron job. **Admin/owner/agent role required.**
+
+Request body — all fields from the CronJob model except `jobId`, `createdAtMs`, `updatedAtMs`, and `state` (those are system-managed):
+
+```json
+{
+  "name": "Daily Workspace Review",
+  "description": "Runs a workspace review every morning",
+  "agentId": "coo",
+  "enabled": true,
+  "schedule": {
+    "kind": "cron",
+    "expr": "0 9 * * *",
+    "tz": "Asia/Singapore"
+  },
+  "sessionTarget": "isolated",
+  "wakeMode": "now",
+  "payload": {
+    "kind": "agentTurn",
+    "message": "Please review the workspace and summarise any blockers.",
+    "model": "openrouter/anthropic/claude-sonnet-4.5"
+  },
+  "delivery": {
+    "mode": "announce"
+  }
+}
+```
+
+- `jobId` is optional — if omitted, the API generates a URL-safe slug from `name` (see [jobId generation](#jobid-generation)).
+- `enabled` defaults to `true` if omitted.
+- `state.nextRunAtMs` is computed automatically from the schedule on creation.
+
+Response `201`:
+
+```json
+{ "data": { /* CronJob */ } }
+```
+
+Errors:
+
+- `400` validation errors (see [validation rules](#validation-rules))
+- `401` authentication required
+- `403` elevated role required
+- `409` a job with the same name already exists
+
+---
+
+### PATCH `/openclaw/cron-jobs/:jobId`
+
+Partially update an existing gateway cron job. **Admin/owner/agent role required.**
+
+Send any subset of mutable CronJob fields. The following fields are **silently ignored** even if included in the body:
+
+- `jobId` — immutable
+- `createdAtMs` — immutable
+- `state` — read-only; managed by the scheduler
+
+`updatedAtMs` is always set to `Date.now()` on a successful update.
+
+Example — change the schedule only:
+
+```json
+{
+  "schedule": {
+    "kind": "cron",
+    "expr": "0 8 * * 1-5",
+    "tz": "Asia/Singapore"
+  }
+}
+```
+
+Response `200`:
+
+```json
+{ "data": { /* updated CronJob */ } }
+```
+
+Errors:
+
+- `400` validation errors
+- `401` authentication required
+- `403` elevated role required, or job is `source: "config"` (heartbeat jobs cannot be updated via this endpoint)
+- `404` job not found
+- `409` a job with the new name already exists
+
+---
+
+### PATCH `/openclaw/cron-jobs/:jobId/enabled`
+
+Enable or disable a cron job. **Admin/owner/agent role required.**
+
+Heartbeat (`source: "config"`) jobs cannot be toggled via this endpoint.
+
+Request body:
+
+```json
+{ "enabled": false }
+```
+
+- When disabling: `state.nextRunAtMs` is set to `null`.
+- When enabling: `state.nextRunAtMs` is recomputed from the schedule.
+
+Response `200`:
+
+```json
+{ "data": { /* updated CronJob */ } }
+```
+
+Errors:
+
+- `400` `enabled` is not a boolean, or job is a heartbeat job
+- `401` authentication required
+- `403` elevated role required
+- `404` job not found
+
+---
+
+### POST `/openclaw/cron-jobs/:jobId/run`
+
+Manually trigger a cron job to run immediately. **Admin/owner/agent role required.**
+
+The API sets `state.nextRunAtMs` to a few seconds from now so the Gateway fires the job on its next polling tick (approximately 60 seconds).
+
+Disabled jobs cannot be triggered — enable the job first.
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "success": true,
+    "sessionId": "agent:coo:cron:daily-workspace-review:run:abc123"
+  }
+}
+```
+
+- `sessionId` is the Gateway session key for the triggered run, or `null` if not yet available.
+
+Errors:
+
+- `400` job is disabled
+- `401` authentication required
+- `403` elevated role required
+- `404` job not found
+
+---
+
+### DELETE `/openclaw/cron-jobs/:jobId`
+
+Delete a gateway cron job. **Admin/owner/agent role required.**
+
+Heartbeat (`source: "config"`) jobs cannot be deleted via this endpoint — remove them from `openclaw.json` agent config instead.
+
+Response `200`:
+
+```json
+{ "data": { "success": true } }
+```
+
+Errors:
+
+- `400` job is a heartbeat job
+- `401` authentication required
+- `403` elevated role required
+- `404` job not found
+
+---
+
+### POST `/openclaw/cron-jobs/repair`
+
+Attempt to repair a corrupted `/cron/jobs.json` file by re-escaping bare newlines in string values. **Admin/owner/agent role required.**
+
+Use this if the jobs file has been corrupted by an agent writing literal newlines inside JSON string values.
+
+Response `200`:
+
+```json
+{
+  "data": {
+    "recovered": 5,
+    "lost": 0,
+    "message": "Repair complete. Recovered 5 job(s)."
+  }
+}
+```
+
+Errors:
+
+- `401` authentication required
+- `403` elevated role required
+- `500` repair failed (file is too corrupted to recover)
+
+---
+
 ## OpenClaw workspace integration
 
 These endpoints integrate with the OpenClaw workspace service for file management.
@@ -1754,13 +2146,14 @@ Errors:
 
 1. **Login** with a dedicated Mosbot integration user (`POST /auth/login`).
 2. **Cache users** for assignee resolution (`GET /users?active_only=true`).
-3. **Optionally cache AI models** for task model selection (`GET /models`). Use the returned `id` values when setting `preferred_model` on tasks.
+3. **Optionally cache AI models** for task model selection (`GET /models`). Use the returned `id` values when setting `preferred_model` on tasks or `payload.model` on cron jobs.
 4. **List tasks** for sync (`GET /tasks?include_archived=true&limit=100&offset=...`).
 5. **Create tasks** on demand (`POST /tasks`). Set `preferred_model` to a model `id` from step 3, or omit/null for system default.
 6. **Update status/assignee/tags/preferred_model** (`PATCH /tasks/:id`).
 7. **Read history** when you need an audit trail (`GET /tasks/:id/history`).
 8. **Optional**: Display daily standups (`GET /standups/latest` or `GET /standups/:id`). Standups are triggered by the OpenClaw Scheduler; use `GET /api/v1/config` for the instance timezone.
 9. **Optional**: Manually trigger standup collection (`POST /standups/:id/run`) to retry a failed standup or run one off-schedule. Create the standup record first with `POST /standups` if it does not yet exist.
+10. **Optional**: Manage scheduled jobs (`GET /openclaw/cron-jobs`). Create jobs with `POST /openclaw/cron-jobs` — `jobId` is auto-generated from the name. Use `PATCH /openclaw/cron-jobs/:jobId` for partial updates; `jobId`, `createdAtMs`, and `state` are immutable. Trigger a job immediately with `POST /openclaw/cron-jobs/:jobId/run`.
 
 ## Quick Reference: All Endpoints
 
@@ -1832,6 +2225,18 @@ Errors:
 - `DELETE /api/v1/standups/:id/entries/:entryId` - Delete standup entry (admin)
 - `POST /api/v1/standups/:id/messages` - Add transcript message (admin)
 - `DELETE /api/v1/standups/:id/messages/:messageId` - Delete transcript message (admin)
+
+### Cron Jobs / Scheduler (Authenticated)
+
+- `GET /api/v1/openclaw/cron-jobs` - List all jobs `{ version, jobs[] }` (all users)
+- `GET /api/v1/openclaw/cron-jobs/stats` - Error and missed counts for badges (all users)
+- `GET /api/v1/openclaw/cron-jobs/:jobId` - Get single job (all users)
+- `POST /api/v1/openclaw/cron-jobs` - Create job (admin)
+- `PATCH /api/v1/openclaw/cron-jobs/:jobId` - Partial update job (admin)
+- `PATCH /api/v1/openclaw/cron-jobs/:jobId/enabled` - Enable/disable job (admin)
+- `POST /api/v1/openclaw/cron-jobs/:jobId/run` - Trigger job immediately (admin)
+- `DELETE /api/v1/openclaw/cron-jobs/:jobId` - Delete job (admin)
+- `POST /api/v1/openclaw/cron-jobs/repair` - Repair corrupted jobs.json (admin)
 
 ### OpenClaw Workspace (Authenticated)
 

@@ -1828,7 +1828,7 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
       withExecutionData: finalJobs.filter(j => j.lastExecution).length,
     });
 
-    res.json({ data: finalJobs });
+    res.json({ data: { version: 1, jobs: finalJobs } });
   } catch (error) {
     if (error.code === 'SERVICE_NOT_CONFIGURED' || error.code === 'SERVICE_UNAVAILABLE') {
       logger.warn('OpenClaw not available for cron jobs, returning empty array', {
@@ -1924,6 +1924,82 @@ async function getHeartbeatJobsFromConfig() {
   }
 }
 
+// GET /api/v1/openclaw/cron-jobs/stats
+// Lightweight stats for attention badges (errors, missed) for any authenticated user
+// NOTE: must be registered before /cron-jobs/:jobId to avoid being swallowed by the param route
+router.get('/cron-jobs/stats', requireAuth, async (req, res, next) => {
+  try {
+    logger.info('Fetching cron jobs stats for attention counts', { userId: req.user.id });
+    const { cronList } = require('../services/openclawGatewayClient');
+
+    const gatewayJobsP = cronList().catch(err => {
+      logger.warn('Failed to fetch gateway jobs for stats', { error: err.message });
+      return [];
+    });
+    const configJobsP = getHeartbeatJobsFromConfig().catch(err => {
+      logger.warn('Failed to fetch config jobs for stats', { error: err.message });
+      return [];
+    });
+
+    let [gatewayJobs, configJobs] = await Promise.all([gatewayJobsP, configJobsP]);
+    if (!Array.isArray(gatewayJobs)) gatewayJobs = [];
+    if (!Array.isArray(configJobs)) configJobs = [];
+
+    const gatewayJobsNormalized = gatewayJobs.map((job) => {
+      let nextRunAtMs = job.state?.nextRunAtMs || null;
+      if (!nextRunAtMs && job.enabled !== false) {
+        if (job.cron || job.expression || (job.schedule?.kind === 'cron' && job.schedule?.expr)) {
+          try {
+            const expr = job.cron || job.expression || job.schedule.expr;
+            const tz = job.tz || job.schedule?.tz || process.env.TIMEZONE || 'UTC';
+            const { CronExpressionParser } = require('cron-parser');
+            nextRunAtMs = CronExpressionParser.parse(expr, { tz }).next().getTime();
+          } catch (_e) {
+            nextRunAtMs = null;
+          }
+        }
+      }
+      return { ...job, nextRunAtMs };
+    });
+
+    const allJobs = [
+      ...gatewayJobsNormalized,
+      ...configJobs.map(j => ({ ...j, nextRunAtMs: j.state?.nextRunAtMs || null })),
+    ];
+    const nowMs = Date.now();
+
+    const errors = allJobs.filter(j => j.state?.lastStatus === 'error' || j.status === 'error').length;
+    const missed = allJobs.filter(
+      j => j.enabled !== false && j.nextRunAtMs && j.nextRunAtMs < nowMs
+    ).length;
+
+    res.json({ data: { errors, missed } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/v1/openclaw/cron-jobs/:jobId
+// Get a single cron job by ID
+router.get('/cron-jobs/:jobId', requireAuth, async (req, res, next) => {
+  try {
+    const { readCronJobs, fromOfficialFormat } = require('../services/cronJobsService');
+    const { jobId } = req.params;
+
+    logger.info('Fetching single cron job', { userId: req.user.id, jobId });
+
+    const jobs = await readCronJobs();
+
+    if (!jobs[jobId]) {
+      return res.status(404).json({ error: { message: `Cron job not found: ${jobId}`, status: 404 } });
+    }
+
+    res.json({ data: fromOfficialFormat(jobs[jobId]) });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // POST /api/v1/openclaw/cron-jobs
 // Create a new gateway cron job (admin only)
 router.post('/cron-jobs', requireAuth, requireAdmin, async (req, res, next) => {
@@ -1943,10 +2019,11 @@ router.post('/cron-jobs', requireAuth, requireAdmin, async (req, res, next) => {
   }
 });
 
-// PUT /api/v1/openclaw/cron-jobs/:jobId
-// Update an existing cron job (admin only)
+// PATCH /api/v1/openclaw/cron-jobs/:jobId
+// Partially update an existing cron job (admin only)
 // Supports both gateway jobs and heartbeat (config) jobs
-router.put('/cron-jobs/:jobId', requireAuth, requireAdmin, async (req, res, next) => {
+// jobId and createdAtMs are immutable and will be ignored if provided in the body
+router.patch('/cron-jobs/:jobId', requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const { updateCronJob, updateHeartbeatJob } = require('../services/cronJobsService');
     const { jobId } = req.params;
@@ -2040,14 +2117,14 @@ router.patch('/cron-jobs/:jobId/enabled', requireAuth, requireAdmin, async (req,
   }
 });
 
-// POST /api/v1/openclaw/cron-jobs/:jobId/trigger
+// POST /api/v1/openclaw/cron-jobs/:jobId/run
 // Manually trigger a cron job to run now (admin only)
-router.post('/cron-jobs/:jobId/trigger', requireAuth, requireAdmin, async (req, res, next) => {
+router.post('/cron-jobs/:jobId/run', requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const { triggerCronJob } = require('../services/cronJobsService');
     const { jobId } = req.params;
 
-    logger.info('Manual cron job trigger requested', {
+    logger.info('Manual cron job run requested', {
       userId: req.user.id,
       jobId,
     });
@@ -2055,9 +2132,9 @@ router.post('/cron-jobs/:jobId/trigger', requireAuth, requireAdmin, async (req, 
     const job = await triggerCronJob(jobId);
 
     res.json({
-      data: job,
-      meta: {
-        message: 'Trigger requested. The job will fire within the next 60 seconds.',
+      data: {
+        success: true,
+        sessionId: job.state?.lastSessionId || null,
       },
     });
   } catch (error) {
@@ -2065,66 +2142,26 @@ router.post('/cron-jobs/:jobId/trigger', requireAuth, requireAdmin, async (req, 
   }
 });
 
-// GET /api/v1/openclaw/cron-jobs/stats
-// Lightweight stats for attention badges (errors, missed) for any authenticated user
-router.get('/cron-jobs/stats', requireAuth, async (req, res, next) => {
+// POST /api/v1/openclaw/cron-jobs/:jobId/trigger
+// Deprecated alias for /run — kept for backwards compatibility
+router.post('/cron-jobs/:jobId/trigger', requireAuth, requireAdmin, async (req, res, next) => {
   try {
-    // Quick version: fetch gateway jobs and config jobs, normalize, get counts
-    logger.info('Fetching cron jobs stats for attention counts', { userId: req.user.id });
-    const { cronList } = require('../services/openclawGatewayClient');
+    const { triggerCronJob } = require('../services/cronJobsService');
+    const { jobId } = req.params;
 
-    // Fetch gateway cron jobs and config heartbeats in parallel
-    const gatewayJobsP = cronList().catch(err => {
-      logger.warn('Failed to fetch gateway jobs for stats', { error: err.message });
-      return [];
-    });
-    const configJobsP = getHeartbeatJobsFromConfig().catch(err => {
-      logger.warn('Failed to fetch config jobs for stats', { error: err.message });
-      return [];
+    logger.info('Manual cron job trigger requested (deprecated /trigger endpoint)', {
+      userId: req.user.id,
+      jobId,
     });
 
-    let [gatewayJobs, configJobs] = await Promise.all([gatewayJobsP, configJobsP]);
-    if (!Array.isArray(gatewayJobs)) gatewayJobs = [];
-    if (!Array.isArray(configJobs)) configJobs = [];
+    const job = await triggerCronJob(jobId);
 
-    // Normalize gateway jobs
-    const gatewayJobsNormalized = gatewayJobs.map((job) => {
-      let nextRunAt = null;
-      // Try to compute nextRunAt from cron/interval like full cron-jobs route (lightweight)
-      if (job.enabled !== false) {
-        if (job.cron || job.expression) {
-          try {
-            // Minimal cron parse to get next run
-            const expr = job.cron || job.expression;
-            const CronExpressionParser = require('cron-parser').CronExpressionParser; // cache hit or lazy load for this route
-            const parsed = new CronExpressionParser(expr);
-            const next = parsed.next();
-            nextRunAt = next.toISOString();
-          } catch (_e) {
-            // fallback: no next run
-            nextRunAt = null;
-          }
-        }
-        if (!nextRunAt && (job.interval || job.every)) {
-          // For every/interval we can't compute a single next date without keeping state, so we skip.
-          nextRunAt = null;
-        }
-      }
-      return {
-        ...job,
-        nextRunAt,
-      };
+    res.json({
+      data: {
+        success: true,
+        sessionId: job.state?.lastSessionId || null,
+      },
     });
-
-    const allJobs = [...gatewayJobsNormalized, ...configJobs.map(j => ({ ...j, nextRunAt: j.nextRunAt || null }))];
-    const now = new Date();
-
-    const errors = allJobs.filter(j => j.status === 'error').length;
-    const missed = allJobs.filter(
-      j => j.enabled !== false && j.nextRunAt && new Date(j.nextRunAt) < now
-    ).length;
-
-    res.json({ data: { errors, missed } });
   } catch (error) {
     next(error);
   }
@@ -2154,8 +2191,8 @@ router.delete('/cron-jobs/:jobId', requireAuth, requireAdmin, async (req, res, n
     });
     
     await deleteCronJob(jobId);
-    
-    res.status(204).send();
+
+    res.json({ data: { success: true } });
   } catch (error) {
     next(error);
   }

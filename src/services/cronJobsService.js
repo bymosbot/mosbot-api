@@ -6,6 +6,37 @@ const { parseJsonWithLiteralNewlines } = require('./openclawGatewayClient');
 const CRON_JOBS_PATH = '/cron/jobs.json';
 
 /**
+ * Derive a URL-safe, human-readable jobId from a job name.
+ * e.g. "Daily Workspace Review" → "daily-workspace-review"
+ *      "COO: Morning Brief (v2)" → "coo-morning-brief-v2"
+ *
+ * If the resulting slug is empty (e.g. all special chars), falls back to a UUID.
+ * If existingIds is provided, appends a numeric suffix to guarantee uniqueness.
+ *
+ * @param {string} name
+ * @param {string[]} [existingIds]
+ * @returns {string}
+ */
+function slugifyJobId(name, existingIds = []) {
+  const base = (name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')  // collapse non-alphanumeric runs to hyphens
+    .replace(/^-+|-+$/g, '')       // trim leading/trailing hyphens
+    .slice(0, 64);                 // cap length
+
+  if (!base) return uuidv4();
+
+  if (!existingIds.includes(base)) return base;
+
+  // Append incrementing suffix until unique
+  for (let i = 2; i <= 999; i++) {
+    const candidate = `${base}-${i}`;
+    if (!existingIds.includes(candidate)) return candidate;
+  }
+  return `${base}-${uuidv4().slice(0, 8)}`;
+}
+
+/**
  * Compute the next run timestamp (ms) for a cron job based on its schedule.
  * Returns null if the schedule cannot be parsed.
  */
@@ -32,28 +63,23 @@ function computeNextRunAtMs(job) {
 }
 
 /**
- * Transform dashboard payload to official OpenClaw cron.add format.
+ * Transform client payload to official OpenClaw cron format.
  *
- * Official shape (from docs.openclaw.ai/cron-jobs):
- *   Main session:
- *     { name, schedule, sessionTarget: "main", wakeMode, payload: { kind: "systemEvent", text } }
- *   Isolated session:
- *     { name, schedule, sessionTarget: "isolated", wakeMode, payload: { kind: "agentTurn", message }, delivery }
- *
- * Dashboard sends:
- *     { name, schedule, sessionTarget, payload: { message, model }, delivery, agentId, enabled, description }
+ * The client now sends the official schema directly — payload.kind is explicit
+ * (agentTurn or systemEvent) rather than being derived from sessionTarget.
+ * This function normalises legacy shapes and fills in defaults.
  */
-function toOfficialFormat(dashboardPayload) {
+function toOfficialFormat(clientPayload) {
   const official = {};
 
-  official.name = dashboardPayload.name;
-  if (dashboardPayload.description) {
-    official.description = dashboardPayload.description;
+  official.name = clientPayload.name;
+  if (clientPayload.description !== undefined) {
+    official.description = clientPayload.description;
   }
 
-  // Schedule — pass through (already uses { kind, expr/everyMs/at })
-  if (dashboardPayload.schedule) {
-    official.schedule = { ...dashboardPayload.schedule };
+  // Schedule — pass through (already uses { kind, expr/everyMs/at/tz/anchorMs })
+  if (clientPayload.schedule) {
+    official.schedule = { ...clientPayload.schedule };
     // Ensure cron schedules always carry a timezone so the Gateway
     // interprets expressions in the instance's local time.
     if (official.schedule.kind === 'cron' && !official.schedule.tz) {
@@ -62,67 +88,100 @@ function toOfficialFormat(dashboardPayload) {
   }
 
   // Session target
-  const sessionTarget = dashboardPayload.sessionTarget || 'main';
+  const sessionTarget = clientPayload.sessionTarget || 'main';
   official.sessionTarget = sessionTarget;
 
-  // Wake mode — default to "now" (matches OpenClaw default)
-  official.wakeMode = dashboardPayload.wakeMode || 'now';
+  // Wake mode
+  official.wakeMode = clientPayload.wakeMode || 'now';
 
-  // Payload — transform based on session target
-  const srcPayload = dashboardPayload.payload || {};
-  const promptText = srcPayload.message || srcPayload.text || srcPayload.prompt || '';
+  // Payload — use explicit kind from client; fall back to legacy derivation
+  const srcPayload = clientPayload.payload || {};
+  const payloadKind = srcPayload.kind || (sessionTarget === 'isolated' ? 'agentTurn' : 'systemEvent');
 
-  if (sessionTarget === 'main') {
-    official.payload = {
-      kind: 'systemEvent',
-      text: promptText,
-    };
-  } else {
+  if (payloadKind === 'agentTurn') {
     official.payload = {
       kind: 'agentTurn',
-      message: promptText,
+      message: srcPayload.message || srcPayload.text || srcPayload.prompt || '',
     };
-  }
-
-  // Model override (only meaningful for isolated/agentTurn, but allowed on main too)
-  if (srcPayload.model) {
-    official.payload.model = srcPayload.model;
+    if (srcPayload.model) {
+      official.payload.model = srcPayload.model;
+    }
+  } else {
+    official.payload = {
+      kind: 'systemEvent',
+      text: srcPayload.text || srcPayload.message || srcPayload.prompt || '',
+    };
   }
 
   // Agent binding
-  if (dashboardPayload.agentId) {
-    official.agentId = dashboardPayload.agentId;
+  if (clientPayload.agentId) {
+    official.agentId = clientPayload.agentId;
   }
 
   // Enabled state
-  if (dashboardPayload.enabled !== undefined) {
-    official.enabled = dashboardPayload.enabled;
+  if (clientPayload.enabled !== undefined) {
+    official.enabled = clientPayload.enabled;
   }
 
-  // Delivery config (only for isolated sessions per docs, but pass through)
-  if (dashboardPayload.delivery && dashboardPayload.delivery.mode) {
-    official.delivery = { ...dashboardPayload.delivery };
+  // Delivery config
+  if (clientPayload.delivery && clientPayload.delivery.mode) {
+    official.delivery = { ...clientPayload.delivery };
   }
 
   return official;
 }
 
 /**
- * Transform official OpenClaw cron job back to dashboard-friendly format.
- * Ensures the dashboard can read payload.message regardless of payload.kind.
+ * Normalise an OpenClaw cron job to the official schema before returning to clients.
+ * - Converts legacy ISO string timestamps to millisecond epoch integers.
+ * - Ensures payload.message is always populated for agentTurn jobs.
+ * - Ensures payload.text is always populated for systemEvent jobs.
  */
 function fromOfficialFormat(job) {
   if (!job) return job;
 
   const normalized = { ...job };
 
-  // Ensure payload.message is set for dashboard display
-  if (normalized.payload) {
-    if (!normalized.payload.message && normalized.payload.text) {
-      normalized.payload.message = normalized.payload.text;
+  // Normalise timestamps to milliseconds
+  if (normalized.createdAt && !normalized.createdAtMs) {
+    normalized.createdAtMs = new Date(normalized.createdAt).getTime();
+  }
+  if (normalized.updatedAt && !normalized.updatedAtMs) {
+    normalized.updatedAtMs = new Date(normalized.updatedAt).getTime();
+  }
+
+  // Normalise state timestamps
+  if (normalized.state) {
+    normalized.state = { ...normalized.state };
+    if (normalized.state.lastRunAt && !normalized.state.lastRunAtMs) {
+      normalized.state.lastRunAtMs = new Date(normalized.state.lastRunAt).getTime();
     }
-    if (!normalized.payload.message && normalized.payload.prompt) {
-      normalized.payload.message = normalized.payload.prompt;
+    if (normalized.state.nextRunAt && !normalized.state.nextRunAtMs) {
+      normalized.state.nextRunAtMs = new Date(normalized.state.nextRunAt).getTime();
+    }
+  }
+
+  // Ensure payload fields are consistent for both payload kinds
+  if (normalized.payload) {
+    if (normalized.payload.kind === 'agentTurn') {
+      if (!normalized.payload.message && normalized.payload.text) {
+        normalized.payload.message = normalized.payload.text;
+      }
+      if (!normalized.payload.message && normalized.payload.prompt) {
+        normalized.payload.message = normalized.payload.prompt;
+      }
+    } else if (normalized.payload.kind === 'systemEvent') {
+      if (!normalized.payload.text && normalized.payload.message) {
+        normalized.payload.text = normalized.payload.message;
+      }
+    } else {
+      // Legacy: no kind set — populate both fields
+      if (!normalized.payload.message && normalized.payload.text) {
+        normalized.payload.message = normalized.payload.text;
+      }
+      if (!normalized.payload.message && normalized.payload.prompt) {
+        normalized.payload.message = normalized.payload.prompt;
+      }
     }
   }
 
@@ -240,70 +299,131 @@ async function writeCronJobs(jobsMap) {
   }
 }
 
+const VALID_AGENT_IDS = ['coo', 'cto', 'cpo', 'cmo'];
+const VALID_SESSION_TARGETS = ['main', 'isolated'];
+const VALID_WAKE_MODES = ['now', 'next-heartbeat'];
+const VALID_SCHEDULE_KINDS = ['cron', 'every', 'at'];
+const VALID_PAYLOAD_KINDS = ['agentTurn', 'systemEvent'];
+const VALID_DELIVERY_MODES = ['none', 'announce'];
+
 /**
- * Validate cron job payload (dashboard format)
+ * Validate a cron job payload against the official schema.
  * @param {Object} job - Job payload to validate
  * @returns {Object} Validation result { valid: boolean, errors: string[] }
  */
 function validateCronJob(job) {
   const errors = [];
-  
+
+  // name
   if (!job.name || typeof job.name !== 'string' || job.name.trim().length === 0) {
     errors.push('name is required and must be a non-empty string');
-  }
-  
-  if (job.name && job.name.length > 200) {
+  } else if (job.name.length > 200) {
     errors.push('name must be 200 characters or less');
   }
-  
+
+  // agentId
+  if (!job.agentId) {
+    errors.push('agentId is required');
+  } else if (!VALID_AGENT_IDS.includes(job.agentId)) {
+    errors.push(`agentId must be one of: ${VALID_AGENT_IDS.join(', ')}`);
+  }
+
+  // enabled
+  if (job.enabled !== undefined && typeof job.enabled !== 'boolean') {
+    errors.push('enabled must be a boolean');
+  }
+
+  // schedule
   if (!job.schedule || typeof job.schedule !== 'object') {
     errors.push('schedule is required and must be an object');
   } else {
     const { kind } = job.schedule;
-    if (!kind || !['cron', 'every', 'at'].includes(kind)) {
-      errors.push('schedule.kind must be one of: cron, every, at');
+    if (!kind || !VALID_SCHEDULE_KINDS.includes(kind)) {
+      errors.push(`schedule.kind must be one of: ${VALID_SCHEDULE_KINDS.join(', ')}`);
     }
-    
+
     if (kind === 'cron') {
       if (!job.schedule.expr || typeof job.schedule.expr !== 'string') {
         errors.push('schedule.expr is required for cron schedules');
-      }
-      if (job.schedule.expr) {
+      } else {
         const parts = job.schedule.expr.trim().split(/\s+/);
         if (parts.length < 5 || parts.length > 6) {
           errors.push('schedule.expr must be a valid cron expression (5 or 6 fields)');
         }
       }
+      if (!job.schedule.tz) {
+        errors.push('schedule.tz is required for cron schedules');
+      }
     }
-    
+
     if (kind === 'every') {
       if (!job.schedule.everyMs || typeof job.schedule.everyMs !== 'number' || job.schedule.everyMs <= 0) {
         errors.push('schedule.everyMs is required and must be a positive number for every schedules');
       }
     }
-    
+
     if (kind === 'at') {
       if (!job.schedule.at) {
         errors.push('schedule.at is required for at schedules');
       }
     }
   }
-  
-  if (job.sessionTarget && !['main', 'isolated'].includes(job.sessionTarget)) {
-    errors.push('sessionTarget must be either "main" or "isolated"');
+
+  // sessionTarget
+  if (!job.sessionTarget) {
+    errors.push('sessionTarget is required');
+  } else if (!VALID_SESSION_TARGETS.includes(job.sessionTarget)) {
+    errors.push(`sessionTarget must be one of: ${VALID_SESSION_TARGETS.join(', ')}`);
   }
-  
-  if (job.delivery) {
-    if (typeof job.delivery !== 'object') {
-      errors.push('delivery must be an object');
-    } else if (job.delivery.mode && !['announce', 'none', 'webhook'].includes(job.delivery.mode)) {
-      errors.push('delivery.mode must be one of: "announce", "none", "webhook"');
+
+  // wakeMode
+  if (!job.wakeMode) {
+    errors.push('wakeMode is required');
+  } else if (!VALID_WAKE_MODES.includes(job.wakeMode)) {
+    errors.push(`wakeMode must be one of: ${VALID_WAKE_MODES.join(', ')}`);
+  }
+
+  // payload
+  if (!job.payload || typeof job.payload !== 'object') {
+    errors.push('payload is required and must be an object');
+  } else {
+    const { kind: payloadKind } = job.payload;
+    if (!payloadKind || !VALID_PAYLOAD_KINDS.includes(payloadKind)) {
+      errors.push(`payload.kind must be one of: ${VALID_PAYLOAD_KINDS.join(', ')}`);
+    }
+
+    if (payloadKind === 'agentTurn') {
+      if (!job.payload.message || typeof job.payload.message !== 'string') {
+        errors.push('payload.message is required when payload.kind is agentTurn');
+      }
+      if (!job.payload.model || typeof job.payload.model !== 'string') {
+        errors.push('payload.model is required when payload.kind is agentTurn');
+      }
+      // Cross-field: agentTurn requires isolated session
+      if (job.sessionTarget && job.sessionTarget !== 'isolated') {
+        errors.push('sessionTarget must be "isolated" when payload.kind is agentTurn');
+      }
+    }
+
+    if (payloadKind === 'systemEvent') {
+      if (!job.payload.text || typeof job.payload.text !== 'string') {
+        errors.push('payload.text is required when payload.kind is systemEvent');
+      }
     }
   }
-  
+
+  // delivery
+  if (job.delivery !== undefined) {
+    if (typeof job.delivery !== 'object') {
+      errors.push('delivery must be an object');
+    } else if (job.delivery.mode && !VALID_DELIVERY_MODES.includes(job.delivery.mode)) {
+      errors.push(`delivery.mode must be one of: ${VALID_DELIVERY_MODES.join(', ')}`);
+    }
+  }
+
   return {
     valid: errors.length === 0,
-    errors
+    errors,
   };
 }
 
@@ -332,12 +452,14 @@ async function createCronJob(payload) {
     if (result) {
       const job = result.job || result;
       const jobId = job.jobId || job.id || uuidv4();
+      const nowMs = Date.now();
       logger.info('Cron job created via Gateway cron.add', { jobId, name: payload.name });
       return fromOfficialFormat({
         ...job,
         jobId,
-        id: jobId,
         source: 'gateway',
+        createdAtMs: job.createdAtMs || nowMs,
+        updatedAtMs: job.updatedAtMs || nowMs,
       });
     }
   } catch (gatewayErr) {
@@ -351,7 +473,8 @@ async function createCronJob(payload) {
 
   // Fallback: write directly to jobs.json
   const jobs = await readCronJobs();
-  const jobId = payload.jobId || uuidv4();
+  const existingIds = Object.keys(jobs);
+  const jobId = payload.jobId || slugifyJobId(payload.name, existingIds);
 
   const existingNames = Object.values(jobs).map(j => j.name);
   if (existingNames.includes(payload.name)) {
@@ -361,21 +484,28 @@ async function createCronJob(payload) {
     throw err;
   }
 
+  const nowMs = Date.now();
   const newJob = {
     ...officialPayload,
     jobId,
-    id: jobId,
     source: 'gateway',
     enabled: payload.enabled !== false,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAtMs: nowMs,
+    updatedAtMs: nowMs,
+    state: {
+      nextRunAtMs: null,
+      lastRunAtMs: null,
+      lastStatus: null,
+      lastDurationMs: 0,
+      consecutiveErrors: 0,
+    },
   };
 
   // Compute state.nextRunAtMs so the Gateway can arm the timer
   if (newJob.enabled !== false) {
     const nextMs = computeNextRunAtMs(newJob);
     if (nextMs) {
-      newJob.state = { nextRunAtMs: nextMs };
+      newJob.state.nextRunAtMs = nextMs;
     }
   }
 
@@ -387,14 +517,19 @@ async function createCronJob(payload) {
 }
 
 /**
- * Update an existing cron job via Gateway cron.update.
+ * Update an existing cron job via Gateway cron.update (PATCH semantics).
  * Falls back to direct file write if the Gateway tool is unavailable.
+ * jobId and createdAtMs are immutable and cannot be changed by callers.
  * @param {string} jobId - Job ID
- * @param {Object} payload - Dashboard-format update payload
+ * @param {Object} patch - Partial job fields to update (official schema)
  * @returns {Promise<Object>} Updated job
  */
-async function updateCronJob(jobId, payload) {
-  const officialPatch = toOfficialFormat(payload);
+async function updateCronJob(jobId, patch) {
+  // Strip immutable fields from the incoming patch
+  // eslint-disable-next-line no-unused-vars
+  const { jobId: _jobId, createdAtMs: _createdAtMs, state: _state, ...safePatch } = patch;
+
+  const officialPatch = toOfficialFormat(safePatch);
 
   // Try Gateway cron.update first
   try {
@@ -405,12 +540,12 @@ async function updateCronJob(jobId, payload) {
     });
     if (result) {
       const job = result.job || result;
-      logger.info('Cron job updated via Gateway cron.update', { jobId, name: payload.name });
+      logger.info('Cron job updated via Gateway cron.update', { jobId, name: patch.name });
       return fromOfficialFormat({
         ...job,
         jobId,
-        id: jobId,
         source: 'gateway',
+        updatedAtMs: Date.now(),
       });
     }
   } catch (gatewayErr) {
@@ -457,15 +592,12 @@ async function updateCronJob(jobId, payload) {
     ...existingJob,
     ...officialPatch,
     jobId,
-    id: jobId,
     source: 'gateway',
-    updatedAt: new Date().toISOString(),
+    createdAtMs: existingJob.createdAtMs,
+    updatedAtMs: Date.now(),
   };
 
-  const validation = validateCronJob({
-    ...updatedJob,
-    payload: { message: updatedJob.payload?.text || updatedJob.payload?.message },
-  });
+  const validation = validateCronJob(updatedJob);
   if (!validation.valid) {
     const err = new Error(`Invalid cron job update: ${validation.errors.join(', ')}`);
     err.status = 400;
@@ -490,7 +622,7 @@ async function updateCronJob(jobId, payload) {
       updatedJob.state = { ...(updatedJob.state || {}), nextRunAtMs: nextMs };
     }
   } else {
-    updatedJob.state = {};
+    updatedJob.state = { ...(updatedJob.state || {}), nextRunAtMs: null };
   }
 
   jobs[jobId] = updatedJob;
@@ -569,8 +701,8 @@ async function setCronJobEnabled(jobId, enabled) {
       return fromOfficialFormat({
         ...job,
         jobId,
-        id: jobId,
         source: 'gateway',
+        updatedAtMs: Date.now(),
       });
     }
   } catch (gatewayErr) {
@@ -582,7 +714,7 @@ async function setCronJobEnabled(jobId, enabled) {
     });
   }
 
-  // Fallback: update in jobs.json
+  // Fallback: update enabled state in jobs.json
   const jobs = await readCronJobs();
 
   if (!jobs[jobId]) {
@@ -602,7 +734,7 @@ async function setCronJobEnabled(jobId, enabled) {
   }
 
   job.enabled = enabled;
-  job.updatedAt = new Date().toISOString();
+  job.updatedAtMs = Date.now();
 
   if (enabled) {
     // Re-compute nextRunAtMs so the Gateway re-arms the timer
@@ -612,7 +744,7 @@ async function setCronJobEnabled(jobId, enabled) {
     }
   } else {
     // Clear nextRunAtMs when disabling
-    job.state = {};
+    job.state = { ...(job.state || {}), nextRunAtMs: null };
   }
 
   jobs[jobId] = job;
@@ -642,7 +774,6 @@ async function triggerCronJob(jobId) {
       return fromOfficialFormat({
         ...job,
         jobId,
-        id: jobId,
         source: 'gateway',
       });
     }
@@ -938,4 +1069,5 @@ module.exports = {
   fromOfficialFormat,
   repairCronJobs,
   fixBareNewlinesInJsonStrings,
+  slugifyJobId,
 };
