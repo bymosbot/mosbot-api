@@ -2265,17 +2265,22 @@ router.get('/cron-jobs/:jobId', requireAuth, async (req, res, next) => {
 
 // POST /api/v1/openclaw/cron-jobs
 // Create a new gateway cron job (admin only)
+// jobId, id, createdAtMs, updatedAtMs, and state are system-managed and ignored if provided
 router.post('/cron-jobs', requireAuth, requireAdmin, async (req, res, next) => {
   try {
     const { createCronJob } = require('../services/cronJobsService');
-    
-    logger.info('Creating cron job', { 
+
+    // Strip system-managed fields — jobId is always generated from the name
+    // eslint-disable-next-line no-unused-vars
+    const { jobId, id, createdAtMs, updatedAtMs, state, ...bodyWithoutSystemFields } = req.body;
+
+    logger.info('Creating cron job', {
       userId: req.user.id,
-      name: req.body.name 
+      name: bodyWithoutSystemFields.name,
     });
-    
-    const job = await createCronJob(req.body);
-    
+
+    const job = await createCronJob(bodyWithoutSystemFields);
+
     res.status(201).json({ data: job });
   } catch (error) {
     next(error);

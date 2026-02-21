@@ -551,7 +551,7 @@ async function createCronJob(payload) {
   // Fallback: write directly to jobs.json
   const jobs = await readCronJobs();
   const existingIds = Object.keys(jobs);
-  const jobId = normalizedPayload.jobId || slugifyJobId(normalizedPayload.name, existingIds);
+  const jobId = slugifyJobId(normalizedPayload.name, existingIds);
 
   const existingNames = Object.values(jobs).map(j => j.name);
   if (existingNames.includes(normalizedPayload.name)) {
