@@ -1218,20 +1218,38 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
       // Session key format: "agent:<agentId>:<kind>[:<uuid>]" or "main"
       // WS RPC returns kind="direct" for all sessions; infer from key structure.
       let kind = session.kind || 'main';
+      let sessionMode = null; // 'main' | 'isolated' — the session persistence mode
       if (kind === 'direct' && session.key) {
         const keyParts = session.key.split(':');
         if (keyParts[0] === 'agent' && keyParts.length >= 3) {
-          const keyKind = keyParts[2]; // e.g. "main", "cron", "subagent", "hook"
+          const keyKind = keyParts[2]; // e.g. "main", "isolated", "cron", "subagent", "hook"
           if (keyKind) kind = keyKind;
         }
       }
+      // Extract sessionMode from key third segment before remapping kind
+      if (session.key) {
+        const keyParts = session.key.split(':');
+        if (keyParts[0] === 'agent' && keyParts.length >= 3) {
+          const seg = keyParts[2];
+          if (seg === 'main' || seg === 'isolated') sessionMode = seg;
+        }
+      }
+      // v2026.2.19+: isolated sessions are heartbeat sessions (key: agent:<id>:isolated)
+      if (kind === 'isolated') kind = 'heartbeat';
+
+      const rawLabel = session.displayName || session.sessionLabel || session.sessionId || session.id;
+      // Capitalize known single-word system labels (e.g. "heartbeat" → "Heartbeat")
+      const label = typeof rawLabel === 'string' && /^[a-z]/.test(rawLabel) && !rawLabel.includes(' ')
+        ? rawLabel.charAt(0).toUpperCase() + rawLabel.slice(1)
+        : rawLabel;
 
       return {
         id: session.sessionId || session.id,
         key: session.key || null,
-        label: session.displayName || session.sessionLabel || session.sessionId || session.id,
+        label,
         status,
         kind,
+        sessionMode,
         updatedAt: updatedAtMs || null,
         agent: agentName,
         model,
