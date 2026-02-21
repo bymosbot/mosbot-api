@@ -485,7 +485,8 @@ async function sessionsListAllViaWs({ includeGlobal = true, includeUnknown = fal
       headers: {
         ...(gatewayToken ? { Authorization: `Bearer ${gatewayToken}` } : {}),
         Origin: gatewayUrl,
-      }
+      },
+      rejectUnauthorized: false,
     });
 
     // Simple incrementing ID for RPC messages
@@ -622,7 +623,8 @@ async function gatewayWsRpc(method, params = {}) {
       headers: {
         ...(gatewayToken ? { Authorization: `Bearer ${gatewayToken}` } : {}),
         Origin: gatewayUrl,
-      }
+      },
+      rejectUnauthorized: false,
     });
 
     let nextId = 1;

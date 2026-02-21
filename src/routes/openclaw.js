@@ -1046,7 +1046,7 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
               const parentKey = runIdx !== -1 ? us.key.slice(0, runIdx) : us.key;
               const existing = cronLatestRunMap.get(parentKey);
               if (!existing || (u.lastActivity || 0) > (existing.lastActivity || 0)) {
-                cronLatestRunMap.set(parentKey, u);
+                cronLatestRunMap.set(parentKey, { ...u, _runKey: us.key });
               }
             }
             for (const s of sessions) {
@@ -1054,7 +1054,15 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
               const runIdx = s.key.indexOf(':run:');
               const parentKey = runIdx !== -1 ? s.key.slice(0, runIdx) : s.key;
               const latestRun = cronLatestRunMap.get(parentKey);
-              if (latestRun) s._cronLatestRun = latestRun;
+              // totalTokens on the parent session (sessions.list) is the context window state
+              // after the last run completed. Run sub-sessions don't appear in sessions.list.
+              // Use the parent session's totalTokens as the context fill for the last run.
+              if (latestRun) {
+                s._cronLatestRun = {
+                  ...latestRun,
+                  totalTokens: s.totalTokens ?? 0,
+                };
+              }
             }
 
             // Enrich usage records with agent_key and model for session_usage persistence
@@ -1214,7 +1222,7 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
       // Context window usage.
       // session.totalTokens from sessions.list is the cumulative lifetime token count,
       // not the current context window fill — it can exceed contextTokens after compaction.
-      // For cron sessions use the latest run's totalTokens (context state at end of that run).
+      // For cron sessions use the latest run's totalTokens (context fill at end of that isolated run).
       // For all sessions cap at contextTokens so the bar never exceeds 100%.
       const contextTokens = session.contextTokens || 0;
       const rawTotalTokens = session._cronLatestRun?.totalTokens ?? session.totalTokens ?? 0;
@@ -1596,6 +1604,13 @@ router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) 
         status = 'idle';
       }
       
+      const metaContextTokens = session.contextTokens || 0;
+      const metaRawTotalTokens = session.totalTokens || 0;
+      const metaTotalTokensUsed = metaContextTokens > 0 ? Math.min(metaRawTotalTokens, metaContextTokens) : metaRawTotalTokens;
+      const metaContextUsagePercent = metaContextTokens > 0
+        ? Math.round((metaTotalTokensUsed / metaContextTokens) * 100 * 10) / 10
+        : 0;
+
       sessionMetadata = {
         id: sessionId,
         key: session.key || sessionKey,
@@ -1604,11 +1619,9 @@ router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) 
         status,
         kind: session.kind || 'main',
         updatedAt: updatedAtMs || null,
-        contextTokens: session.contextTokens || 0,
-        totalTokensUsed: session.totalTokens || 0,
-        contextUsagePercent: session.contextTokens > 0 
-          ? Math.round((session.totalTokens / session.contextTokens) * 100 * 10) / 10 
-          : 0
+        contextTokens: metaContextTokens,
+        totalTokensUsed: metaTotalTokensUsed,
+        contextUsagePercent: metaContextUsagePercent,
       };
     }
     
@@ -1815,36 +1828,66 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
 
       const allSessions = sessionsResult?.sessions || [];
       allSessions.forEach(s => {
-        if (s.key && s.key.includes(':cron:')) {
+        if (s.key && (
+          s.key.includes(':cron:') ||
+          s.key.includes(':heartbeat') ||
+          // v2026.2.19+: isolated heartbeat sessions use agent:<id>:isolated
+          /^agent:[^:]+:isolated$/.test(s.key)
+        )) {
           cronSessionMap.set(s.key, s);
         }
       });
 
-      // Group usage entries by parent cron key and aggregate.
-      // Each :run: entry has full token/cache/cost breakdown in usage.
+      // Group usage entries by parent cron key.
+      // For isolated crons there are both per-run entries (:run: suffix) and a
+      // parent entry that accumulates cumulative stats across all runs. If we
+      // let the parent entry compete for latestRun its lastActivity always wins
+      // (it is updated after every run) and we end up showing cumulative totals
+      // instead of the latest run's stats. Bucket them separately and prefer
+      // isolated run entries; fall back to the parent entry only for non-isolated
+      // crons that have no :run: entries at all.
+      //
+      // Also covers heartbeat sessions:
+      //   - Older format:   agent:<id>:heartbeat  (no :cron:)
+      //   - v2026.2.19+:    agent:<id>:isolated   (no :cron:)
+      //   - Isolated runs:  agent:<id>:isolated:run:<runId>
+      const isCronOrHeartbeatKey = (key) =>
+        key.includes(':cron:') ||
+        key.includes(':heartbeat') ||
+        /^agent:[^:]+:isolated(:|$)/.test(key);
+
+      const cronRawBuckets = new Map(); // parentKey -> { runs: [], parent: null }
       for (const entry of (usageResult?.sessions || [])) {
-        if (!entry.key || !entry.key.includes(':cron:')) continue;
+        if (!entry.key || !isCronOrHeartbeatKey(entry.key)) continue;
         const runIdx = entry.key.indexOf(':run:');
-        const parentKey = runIdx !== -1 ? entry.key.slice(0, runIdx) : entry.key;
-        const u = entry.usage || {};
+        const isIsolatedRun = runIdx !== -1;
+        const parentKey = isIsolatedRun ? entry.key.slice(0, runIdx) : entry.key;
 
-        let agg = cronUsageByParent.get(parentKey);
-        if (!agg) {
-          agg = {
-            totalCost: 0,
-            latestRun: null,
-            latestActivity: 0,
-          };
-          cronUsageByParent.set(parentKey, agg);
+        if (!cronRawBuckets.has(parentKey)) {
+          cronRawBuckets.set(parentKey, { runs: [], parent: null });
         }
-
-        agg.totalCost += u.totalCost || 0;
-
-        const activity = u.lastActivity || 0;
-        if (activity > agg.latestActivity) {
-          agg.latestActivity = activity;
-          agg.latestRun = u;
+        const bucket = cronRawBuckets.get(parentKey);
+        if (isIsolatedRun) {
+          bucket.runs.push(entry.usage || {});
+        } else {
+          bucket.parent = entry.usage || {};
         }
+      }
+
+      for (const [parentKey, bucket] of cronRawBuckets) {
+        // Prefer isolated run entries to avoid cumulative inflation from the
+        // parent session. Fall back to the parent entry for non-isolated crons.
+        const entries = bucket.runs.length > 0 ? bucket.runs : (bucket.parent ? [bucket.parent] : []);
+        const agg = { totalCost: 0, latestRun: null, latestActivity: 0 };
+        for (const u of entries) {
+          agg.totalCost += u.totalCost || 0;
+          const activity = u.lastActivity || 0;
+          if (activity > agg.latestActivity) {
+            agg.latestActivity = activity;
+            agg.latestRun = u;
+          }
+        }
+        cronUsageByParent.set(parentKey, agg);
       }
 
       logger.info('Cron sessions fetched via WebSocket RPC', {
@@ -1859,14 +1902,28 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
     }
 
     // Merge execution data from cron sessions into each cron job.
-    // Session key is constructed as agent:{agentId}:cron:{jobId}.
+    // Gateway cron session key: agent:{agentId}:cron:{jobId}
+    // Heartbeat session key:    agent:{agentId}:heartbeat  (older)
+    //                        OR agent:{agentId}:isolated   (v2026.2.19+ with session: isolated)
     const jobsWithExecutionData = enrichedJobs.map(job => {
-      if (job.source !== 'gateway' || !job.agentId) {
-        return job;
+      if (!job.agentId) return job;
+
+      const isHeartbeatJob = job.source === 'config' || job.payload?.kind === 'heartbeat';
+      const jobId = job.jobId || job.id;
+
+      // Gateway-only guard for non-heartbeat jobs
+      if (!isHeartbeatJob && job.source !== 'gateway') return job;
+
+      let expectedKey;
+      if (isHeartbeatJob) {
+        // Try both heartbeat key variants; prefer isolated (v2026.2.19+) if present
+        const isolatedKey = `agent:${job.agentId}:isolated`;
+        const heartbeatKey = `agent:${job.agentId}:heartbeat`;
+        expectedKey = cronSessionMap.has(isolatedKey) ? isolatedKey : heartbeatKey;
+      } else {
+        expectedKey = `agent:${job.agentId}:cron:${jobId}`;
       }
 
-      const jobId = job.jobId || job.id;
-      const expectedKey = `agent:${job.agentId}:cron:${jobId}`;
       const matchedSession = cronSessionMap.get(expectedKey);
       const usageAgg = cronUsageByParent.get(expectedKey);
       const latestRun = usageAgg?.latestRun;

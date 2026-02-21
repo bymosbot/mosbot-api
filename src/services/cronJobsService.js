@@ -63,11 +63,42 @@ function computeNextRunAtMs(job) {
 }
 
 /**
+ * Convert an interval (everyMs) to a cron expression for OpenClaw.
+ * Cron has minute granularity; sub-minute intervals are rounded up to 1 minute.
+ *
+ * @param {number} everyMs - Interval in milliseconds
+ * @returns {{ expr: string }} Cron expression (5 fields: minute hour dom month dow)
+ */
+function everyMsToCronExpr(everyMs) {
+  const MS_PER_MIN = 60000;
+  const MS_PER_HOUR = 3600000;
+
+  if (!everyMs || everyMs < MS_PER_MIN) {
+    return { expr: '* * * * *' };
+  }
+
+  const minutes = everyMs / MS_PER_MIN;
+  const hours = everyMs / MS_PER_HOUR;
+
+  if (hours >= 1 && Number.isInteger(hours) && hours <= 24) {
+    return { expr: `0 */${hours} * * *` };
+  }
+  if (minutes >= 1 && minutes <= 60 && Number.isInteger(minutes)) {
+    return { expr: `*/${minutes} * * * *` };
+  }
+  const minutesRounded = Math.max(1, Math.ceil(minutes));
+  return { expr: `*/${minutesRounded} * * * *` };
+}
+
+/**
  * Transform client payload to official OpenClaw cron format.
  *
  * The client now sends the official schema directly — payload.kind is explicit
  * (agentTurn or systemEvent) rather than being derived from sessionTarget.
  * This function normalises legacy shapes and fills in defaults.
+ *
+ * Interval schedules (kind: 'every') are translated to cron so OpenClaw
+ * receives only cron-compatible schedules.
  *
  * PATCH semantics: only fields explicitly present in clientPayload are included
  * in the output. Fields absent from clientPayload are omitted so they don't
@@ -83,13 +114,18 @@ function toOfficialFormat(clientPayload) {
     official.description = clientPayload.description;
   }
 
-  // Schedule — pass through (already uses { kind, expr/everyMs/at/tz/anchorMs })
+  // Schedule — pass through; translate 'every' to cron for OpenClaw
   if (clientPayload.schedule) {
-    official.schedule = { ...clientPayload.schedule };
-    // Ensure cron schedules always carry a timezone so the Gateway
-    // interprets expressions in the instance's local time.
-    if (official.schedule.kind === 'cron' && !official.schedule.tz) {
-      official.schedule.tz = process.env.TIMEZONE || 'UTC';
+    const sched = clientPayload.schedule;
+    if (sched.kind === 'every' && typeof sched.everyMs === 'number' && sched.everyMs > 0) {
+      const { expr } = everyMsToCronExpr(sched.everyMs);
+      const tz = sched.tz || process.env.TIMEZONE || 'UTC';
+      official.schedule = { kind: 'cron', expr, tz };
+    } else {
+      official.schedule = { ...sched };
+      if (official.schedule.kind === 'cron' && !official.schedule.tz) {
+        official.schedule.tz = process.env.TIMEZONE || 'UTC';
+      }
     }
   }
 
