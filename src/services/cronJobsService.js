@@ -5,6 +5,11 @@ const { parseJsonWithLiteralNewlines } = require('./openclawGatewayClient');
 
 const CRON_JOBS_PATH = '/cron/jobs.json';
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+function isUuid(str) {
+  return typeof str === 'string' && UUID_RE.test(str);
+}
+
 /**
  * Derive a URL-safe, human-readable jobId from a job name.
  * e.g. "Daily Workspace Review" → "daily-workspace-review"
@@ -287,15 +292,17 @@ async function readCronJobs() {
     if (Array.isArray(parsed)) {
       jobsMap = {};
       parsed.forEach(job => {
-        const id = job.jobId || job.id || uuidv4();
-        jobsMap[id] = { ...job, jobId: id };
+        const jobId = job.jobId || job.id || uuidv4();
+        const id = job.id || (isUuid(jobId) ? jobId : uuidv4());
+        jobsMap[jobId] = { ...job, id, jobId };
       });
     } else if (parsed.jobs) {
       if (Array.isArray(parsed.jobs)) {
         jobsMap = {};
         parsed.jobs.forEach(job => {
-          const id = job.jobId || job.id || uuidv4();
-          jobsMap[id] = { ...job, jobId: id };
+          const jobId = job.jobId || job.id || uuidv4();
+          const id = job.id || (isUuid(jobId) ? jobId : uuidv4());
+          jobsMap[jobId] = { ...job, id, jobId };
         });
       } else {
         jobsMap = parsed.jobs;
@@ -304,11 +311,20 @@ async function readCronJobs() {
       jobsMap = parsed;
     }
 
-    // Migration: agentTurn jobs must have sessionTarget='isolated'.
-    // Fix any legacy jobs that were stored with sessionTarget='main' (the old
-    // incorrect default) so every subsequent run gets a fresh context.
+    // Migration: ensure every job has both jobId (slug) and id (UUID).
+    // Also fix agentTurn jobs that were stored with sessionTarget='main'.
     let migrationNeeded = false;
-    for (const job of Object.values(jobsMap)) {
+    for (const [mapKey, job] of Object.entries(jobsMap)) {
+      // Backfill jobId from the map key if missing
+      if (!job.jobId) {
+        job.jobId = mapKey;
+        migrationNeeded = true;
+      }
+      // Backfill id (UUID) if missing — OpenClaw requires it for cron.runs lookups
+      if (!job.id) {
+        job.id = isUuid(job.jobId) ? job.jobId : uuidv4();
+        migrationNeeded = true;
+      }
       if (job.payload?.kind === 'agentTurn' && job.sessionTarget !== 'isolated') {
         logger.info('jobs.json migration: correcting sessionTarget to "isolated" for agentTurn job', {
           jobId: job.jobId,
@@ -325,7 +341,7 @@ async function readCronJobs() {
       logger.info('jobs.json rewrite triggered', {
         path: CRON_JOBS_PATH,
         count: Object.keys(jobsMap).length,
-        reason: wasRepaired ? 'auto-repair' : 'sessionTarget migration',
+        reason: wasRepaired ? 'auto-repair' : 'id/sessionTarget migration',
       });
       writeCronJobs(jobsMap).catch(writeErr => {
         logger.warn('jobs.json rewrite failed', { error: writeErr.message });
@@ -528,11 +544,15 @@ async function createCronJob(payload) {
     const result = await invokeTool('cron.add', officialPayload);
     if (result) {
       const job = result.job || result;
+      // Preserve both id (UUID) and jobId (slug) from the Gateway response.
+      // OpenClaw uses id internally for cron.runs history lookups.
       const jobId = job.jobId || job.id || uuidv4();
+      const id = job.id || job.jobId || jobId;
       const nowMs = Date.now();
-      logger.info('Cron job created via Gateway cron.add', { jobId, name: payload.name });
+      logger.info('Cron job created via Gateway cron.add', { jobId, id, name: payload.name });
       return fromOfficialFormat({
         ...job,
+        id,
         jobId,
         source: 'gateway',
         createdAtMs: job.createdAtMs || nowMs,
@@ -552,6 +572,9 @@ async function createCronJob(payload) {
   const jobs = await readCronJobs();
   const existingIds = Object.keys(jobs);
   const jobId = slugifyJobId(normalizedPayload.name, existingIds);
+  // OpenClaw requires both jobId (slug) and id (UUID) on every stored job.
+  // id is used internally for cron.runs history lookups.
+  const id = uuidv4();
 
   const existingNames = Object.values(jobs).map(j => j.name);
   if (existingNames.includes(normalizedPayload.name)) {
@@ -564,6 +587,7 @@ async function createCronJob(payload) {
   const nowMs = Date.now();
   const newJob = {
     ...officialPayload,
+    id,
     jobId,
     source: 'gateway',
     enabled: payload.enabled !== false,
@@ -589,7 +613,7 @@ async function createCronJob(payload) {
   jobs[jobId] = newJob;
   await writeCronJobs(jobs);
 
-  logger.info('Cron job created via file fallback', { jobId, name: newJob.name, sessionTarget: newJob.sessionTarget });
+  logger.info('Cron job created via file fallback', { jobId, id, name: newJob.name, sessionTarget: newJob.sessionTarget });
   return fromOfficialFormat(newJob);
 }
 
