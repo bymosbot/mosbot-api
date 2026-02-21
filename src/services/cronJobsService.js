@@ -11,37 +11,6 @@ function isUuid(str) {
 }
 
 /**
- * Derive a URL-safe, human-readable jobId from a job name.
- * e.g. "Daily Workspace Review" → "daily-workspace-review"
- *      "COO: Morning Brief (v2)" → "coo-morning-brief-v2"
- *
- * If the resulting slug is empty (e.g. all special chars), falls back to a UUID.
- * If existingIds is provided, appends a numeric suffix to guarantee uniqueness.
- *
- * @param {string} name
- * @param {string[]} [existingIds]
- * @returns {string}
- */
-function slugifyJobId(name, existingIds = []) {
-  const base = (name || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')  // collapse non-alphanumeric runs to hyphens
-    .replace(/^-+|-+$/g, '')       // trim leading/trailing hyphens
-    .slice(0, 64);                 // cap length
-
-  if (!base) return uuidv4();
-
-  if (!existingIds.includes(base)) return base;
-
-  // Append incrementing suffix until unique
-  for (let i = 2; i <= 999; i++) {
-    const candidate = `${base}-${i}`;
-    if (!existingIds.includes(candidate)) return candidate;
-  }
-  return `${base}-${uuidv4().slice(0, 8)}`;
-}
-
-/**
  * Compute the next run timestamp (ms) for a cron job based on its schedule.
  * Returns null if the schedule cannot be parsed.
  */
@@ -292,17 +261,15 @@ async function readCronJobs() {
     if (Array.isArray(parsed)) {
       jobsMap = {};
       parsed.forEach(job => {
-        const jobId = job.jobId || job.id || uuidv4();
-        const id = job.id || (isUuid(jobId) ? jobId : uuidv4());
-        jobsMap[jobId] = { ...job, id, jobId };
+        const jobId = job.jobId || job.id;
+        if (jobId) jobsMap[jobId] = { ...job, jobId };
       });
     } else if (parsed.jobs) {
       if (Array.isArray(parsed.jobs)) {
         jobsMap = {};
         parsed.jobs.forEach(job => {
-          const jobId = job.jobId || job.id || uuidv4();
-          const id = job.id || (isUuid(jobId) ? jobId : uuidv4());
-          jobsMap[jobId] = { ...job, id, jobId };
+          const jobId = job.jobId || job.id;
+          if (jobId) jobsMap[jobId] = { ...job, jobId };
         });
       } else {
         jobsMap = parsed.jobs;
@@ -544,10 +511,10 @@ async function createCronJob(payload) {
     const result = await invokeTool('cron.add', officialPayload);
     if (result) {
       const job = result.job || result;
-      // Preserve both id (UUID) and jobId (slug) from the Gateway response.
+      // Preserve both id (UUID) and jobId (slug) assigned by the Gateway.
       // OpenClaw uses id internally for cron.runs history lookups.
-      const jobId = job.jobId || job.id || uuidv4();
-      const id = job.id || job.jobId || jobId;
+      const jobId = job.jobId || job.id;
+      const id = job.id || job.jobId;
       const nowMs = Date.now();
       logger.info('Cron job created via Gateway cron.add', { jobId, id, name: payload.name });
       return fromOfficialFormat({
@@ -568,53 +535,11 @@ async function createCronJob(payload) {
     });
   }
 
-  // Fallback: write directly to jobs.json
-  const jobs = await readCronJobs();
-  const existingIds = Object.keys(jobs);
-  const jobId = slugifyJobId(normalizedPayload.name, existingIds);
-  // OpenClaw requires both jobId (slug) and id (UUID) on every stored job.
-  // id is used internally for cron.runs history lookups.
-  const id = uuidv4();
-
-  const existingNames = Object.values(jobs).map(j => j.name);
-  if (existingNames.includes(normalizedPayload.name)) {
-    const err = new Error(`A cron job with name "${normalizedPayload.name}" already exists`);
-    err.status = 409;
-    err.code = 'DUPLICATE_NAME';
-    throw err;
-  }
-
-  const nowMs = Date.now();
-  const newJob = {
-    ...officialPayload,
-    id,
-    jobId,
-    source: 'gateway',
-    enabled: payload.enabled !== false,
-    createdAtMs: nowMs,
-    updatedAtMs: nowMs,
-    state: {
-      nextRunAtMs: null,
-      lastRunAtMs: null,
-      lastStatus: null,
-      lastDurationMs: 0,
-      consecutiveErrors: 0,
-    },
-  };
-
-  // Compute state.nextRunAtMs so the Gateway can arm the timer
-  if (newJob.enabled !== false) {
-    const nextMs = computeNextRunAtMs(newJob);
-    if (nextMs) {
-      newJob.state.nextRunAtMs = nextMs;
-    }
-  }
-
-  jobs[jobId] = newJob;
-  await writeCronJobs(jobs);
-
-  logger.info('Cron job created via file fallback', { jobId, id, name: newJob.name, sessionTarget: newJob.sessionTarget });
-  return fromOfficialFormat(newJob);
+  // Creation requires the Gateway — only OpenClaw assigns jobId and id.
+  const err = new Error('OpenClaw Gateway is required to create cron jobs. The Gateway was unavailable.');
+  err.status = 503;
+  err.code = 'SERVICE_UNAVAILABLE';
+  throw err;
 }
 
 /**
@@ -1089,15 +1014,21 @@ async function repairCronJobs() {
   }
 
   const jobsMap = {};
+  let lost = 0;
   jobsArray.forEach(job => {
-    const id = job.jobId || job.id || uuidv4();
-    jobsMap[id] = { ...job, jobId: id };
+    const jobId = job.jobId || job.id;
+    if (!jobId) {
+      logger.warn('repairCronJobs: skipping job with no jobId or id', { name: job.name });
+      lost++;
+      return;
+    }
+    jobsMap[jobId] = { ...job, jobId };
   });
 
   await writeCronJobs(jobsMap);
-  logger.info('repairCronJobs: jobs.json repaired and rewritten', { count: jobsArray.length });
+  logger.info('repairCronJobs: jobs.json repaired and rewritten', { count: Object.keys(jobsMap).length, lost });
 
-  return { recovered: jobsArray.length, lost: 0, jobs: jobsMap };
+  return { recovered: Object.keys(jobsMap).length, lost, jobs: jobsMap };
 }
 
 /**
@@ -1170,5 +1101,4 @@ module.exports = {
   fromOfficialFormat,
   repairCronJobs,
   fixBareNewlinesInJsonStrings,
-  slugifyJobId,
 };
