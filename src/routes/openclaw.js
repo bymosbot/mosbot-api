@@ -1038,15 +1038,42 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
             // For cron sessions: find the latest individual run from sessions.usage
             // so we show per-run token/cost data instead of the daily aggregate total.
             // Mirrors the same logic used in the cron-jobs endpoint.
-            const cronLatestRunMap = new Map();
+            // Group by parent key and separate :run: entries from parent entries
+            // to avoid using cumulative parent values as per-run data.
+            const cronBuckets = new Map(); // parentKey -> { runs: [], parent: null }
             for (const us of usageResult.sessions) {
               if (!us.key || !us.key.includes(':cron:')) continue;
               const u = us.usage || {};
               const runIdx = us.key.indexOf(':run:');
-              const parentKey = runIdx !== -1 ? us.key.slice(0, runIdx) : us.key;
-              const existing = cronLatestRunMap.get(parentKey);
-              if (!existing || (u.lastActivity || 0) > (existing.lastActivity || 0)) {
-                cronLatestRunMap.set(parentKey, { ...u, _runKey: us.key });
+              const isRun = runIdx !== -1;
+              const parentKey = isRun ? us.key.slice(0, runIdx) : us.key;
+              if (!cronBuckets.has(parentKey)) {
+                cronBuckets.set(parentKey, { runs: [], parent: null });
+              }
+              const bucket = cronBuckets.get(parentKey);
+              if (isRun) {
+                bucket.runs.push({ ...u, _runKey: us.key });
+              } else {
+                bucket.parent = { ...u, _runKey: us.key };
+              }
+            }
+            const cronLatestRunMap = new Map();
+            for (const [parentKey, bucket] of cronBuckets) {
+              const hasRuns = bucket.runs.length > 0;
+              const candidates = hasRuns ? bucket.runs : (bucket.parent ? [bucket.parent] : []);
+              let latest = null;
+              for (const u of candidates) {
+                if (!latest || (u.lastActivity || 0) > (latest.lastActivity || 0)) {
+                  latest = u;
+                }
+              }
+              if (latest) {
+                let isCumul = !hasRuns;
+                if (hasRuns && bucket.runs.length === 1) {
+                  const userMsgs = bucket.runs[0]?.messageCounts?.user || 0;
+                  if (userMsgs > 1) isCumul = true;
+                }
+                cronLatestRunMap.set(parentKey, { ...latest, _isCumulative: isCumul });
               }
             }
             for (const s of sessions) {
@@ -1196,8 +1223,9 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
       const model = actualModel || null;
       
       // Extract token usage.
-      // Cron sessions: use the latest individual run's data (_cronLatestRun) so the
-      // display reflects "last run" rather than the daily aggregate across all runs.
+      // Cron sessions: use the latest run's data (_cronLatestRun). When the gateway
+      // collapses all isolated runs into one entry, _isCumulative is set so the
+      // dashboard can label values as "Total" instead of "Last".
       // All other sessions: prefer enriched daily totals from sessions.usage (_usage* fields),
       // fall back to session-level fields, then last message usage.
       const usage = lastMessage?.usage || {};
@@ -1208,14 +1236,14 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
         outputTokens = r.output || 0;
         cacheReadTokens = r.cacheRead || 0;
         cacheWriteTokens = r.cacheWrite || 0;
-        messageCost = r.totalCost || estimateCostFromTokens(model, inputTokens, outputTokens) || 0;
+        messageCost = r.totalCost || estimateCostFromTokens(model, inputTokens, outputTokens, { cacheReadTokens, cacheWriteTokens }) || 0;
       } else {
-        inputTokens = session._usageInput || session.inputTokens || ((usage.input || 0) + (usage.cacheRead || 0));
+        inputTokens = session._usageInput || session.inputTokens || (usage.input || 0);
         outputTokens = session._usageOutput || session.outputTokens || (usage.output || 0);
         cacheReadTokens = session._cacheRead || usage.cacheRead || 0;
         cacheWriteTokens = session._cacheWrite || usage.cacheWrite || 0;
         messageCost = session._totalCost || usage.cost?.total
-          || estimateCostFromTokens(model, inputTokens, outputTokens)
+          || estimateCostFromTokens(model, inputTokens, outputTokens, { cacheReadTokens, cacheWriteTokens })
           || 0;
       }
 
@@ -1290,6 +1318,9 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
         ? rawLabel.charAt(0).toUpperCase() + rawLabel.slice(1)
         : rawLabel;
 
+      const isCumulative = session._cronLatestRun?._isCumulative === true;
+      const todayTotalCost = session._cronLatestRun?.totalCost ?? null;
+
       return {
         id: session.sessionId || session.id,
         key: session.key || null,
@@ -1309,6 +1340,8 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
         cacheReadTokens,
         cacheWriteTokens,
         messageCost,
+        todayTotalCost,
+        isCumulative,
         // Last message
         lastMessage: lastMessageText,
         lastMessageRole: lastMessage?.role || null,
@@ -1877,14 +1910,29 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
       for (const [parentKey, bucket] of cronRawBuckets) {
         // Prefer isolated run entries to avoid cumulative inflation from the
         // parent session. Fall back to the parent entry for non-isolated crons.
-        const entries = bucket.runs.length > 0 ? bucket.runs : (bucket.parent ? [bucket.parent] : []);
-        const agg = { totalCost: 0, latestRun: null, latestActivity: 0 };
+        const hasRuns = bucket.runs.length > 0;
+        const entries = hasRuns ? bucket.runs : (bucket.parent ? [bucket.parent] : []);
+        const agg = { totalCost: 0, latestRun: null, latestActivity: 0, isCumulative: false };
         for (const u of entries) {
           agg.totalCost += u.totalCost || 0;
           const activity = u.lastActivity || 0;
           if (activity > agg.latestActivity) {
             agg.latestActivity = activity;
             agg.latestRun = u;
+          }
+        }
+        // Detect cumulative data in two scenarios:
+        // 1. No :run: sub-keys — parent entry is the only source.
+        // 2. Gateway collapsed all isolated runs into a single :run: entry
+        //    whose messageCounts.user > 1 (each cron trigger = 1 user msg).
+        if (!hasRuns && bucket.parent) {
+          agg.isCumulative = true;
+          agg.runCount = entries.length;
+        } else if (hasRuns && bucket.runs.length === 1) {
+          const userMsgs = bucket.runs[0]?.messageCounts?.user || 0;
+          if (userMsgs > 1) {
+            agg.isCumulative = true;
+            agg.runCount = userMsgs;
           }
         }
         cronUsageByParent.set(parentKey, agg);
@@ -1930,14 +1978,17 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
       const jobLastRunMs = job.state?.lastRunAtMs;
 
       if (matchedSession || latestRun) {
+        const isCumulative = usageAgg?.isCumulative === true;
+        const actualModel = matchedSession?.model || null;
+
         const inputTokens = latestRun?.input ?? matchedSession?.inputTokens ?? 0;
         const outputTokens = latestRun?.output ?? matchedSession?.outputTokens ?? 0;
         const cacheReadTokens = latestRun?.cacheRead ?? 0;
         const cacheWriteTokens = latestRun?.cacheWrite ?? 0;
-        const actualModel = matchedSession?.model || null;
         const messageCost = latestRun?.totalCost
-          || estimateCostFromTokens(actualModel, inputTokens, outputTokens)
+          || estimateCostFromTokens(actualModel, inputTokens, outputTokens, { cacheReadTokens, cacheWriteTokens })
           || 0;
+
         const todayTotalCost = usageAgg?.totalCost ?? 0;
         const contextTokens = matchedSession?.contextTokens || 0;
         // latestRun.totalTokens is the context state at the end of that run; cap at contextTokens.
@@ -1956,6 +2007,7 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
             cacheWriteTokens,
             messageCost,
             todayTotalCost,
+            isCumulative,
             model: actualModel,
             lastMessage: null,
             updatedAt: toUpdatedAtMs(matchedSession?.updatedAt ?? matchedSession?.updated_at) || jobLastRunMs || null,

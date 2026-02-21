@@ -31,6 +31,7 @@ services:
       - "host.docker.internal:host-gateway"
     environment:
       NODE_ENV: development
+      NODE_TLS_REJECT_UNAUTHORIZED: "0"
       PORT: 3000
       TIMEZONE: ${TIMEZONE:-UTC}
       DB_HOST: postgres

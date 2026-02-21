@@ -138,20 +138,33 @@ async function syncPricingFromOpenRouter() {
  * Returns null when no pricing data is available for the given model so that
  * callers can preserve an explicit zero rather than showing a misleading value.
  *
+ * Cache read tokens are priced at 10% of the prompt price (standard discount
+ * across OpenRouter / Anthropic / OpenAI providers). Cache write tokens are
+ * priced at 125% of the prompt price (Anthropic convention; other providers
+ * may vary but this is a reasonable default).
+ *
  * @param {string|null} modelId  Session model ID (may include "openrouter/" prefix)
- * @param {number} inputTokens
+ * @param {number} inputTokens   Non-cached input tokens
  * @param {number} outputTokens
+ * @param {object} [opts]
+ * @param {number} [opts.cacheReadTokens=0]  Tokens served from provider cache
+ * @param {number} [opts.cacheWriteTokens=0] Tokens written to provider cache
  * @returns {number|null}
  */
-function estimateCostFromTokens(modelId, inputTokens, outputTokens) {
+function estimateCostFromTokens(modelId, inputTokens, outputTokens, opts = {}) {
   if (!modelId) return null;
   const normalizedId = normalizeModelId(modelId);
   const pricing = pricingCache.get(normalizedId);
   if (!pricing) return null;
 
+  const cacheReadTokens = opts.cacheReadTokens || 0;
+  const cacheWriteTokens = opts.cacheWriteTokens || 0;
+
   const cost =
     (inputTokens || 0) * pricing.promptCostPerToken +
-    (outputTokens || 0) * pricing.completionCostPerToken;
+    (outputTokens || 0) * pricing.completionCostPerToken +
+    cacheReadTokens * pricing.promptCostPerToken * 0.1 +
+    cacheWriteTokens * pricing.promptCostPerToken * 1.25;
 
   return cost > 0 ? cost : null;
 }
