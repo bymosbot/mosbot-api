@@ -505,7 +505,7 @@ async function createCronJob(payload) {
 
   const officialPayload = toOfficialFormat(normalizedPayload);
 
-  // Try Gateway cron.add first
+  // Attempt 1: Gateway cron.add via /tools/invoke
   try {
     const { invokeTool } = require('./openclawGatewayClient');
     const result = await invokeTool('cron.add', officialPayload);
@@ -516,7 +516,7 @@ async function createCronJob(payload) {
       const jobId = job.jobId || job.id;
       const id = job.id || job.jobId;
       const nowMs = Date.now();
-      logger.info('Cron job created via Gateway cron.add', { jobId, id, name: payload.name });
+      logger.info('Cron job created via Gateway cron.add (tools/invoke)', { jobId, id, name: payload.name });
       return fromOfficialFormat({
         ...job,
         id,
@@ -526,20 +526,110 @@ async function createCronJob(payload) {
         updatedAtMs: job.updatedAtMs || nowMs,
       });
     }
+    // null means tool not available — fall through to WS RPC
   } catch (gatewayErr) {
     if (gatewayErr.code === 'SERVICE_NOT_CONFIGURED' || gatewayErr.code === 'SERVICE_UNAVAILABLE') {
       throw gatewayErr;
     }
-    logger.warn('Gateway cron.add failed, falling back to file write', {
+    logger.warn('Gateway cron.add (tools/invoke) failed, trying WS RPC', {
       error: gatewayErr.message,
     });
   }
 
-  // Creation requires the Gateway — only OpenClaw assigns jobId and id.
-  const err = new Error('OpenClaw Gateway is required to create cron jobs. The Gateway was unavailable.');
-  err.status = 503;
-  err.code = 'SERVICE_UNAVAILABLE';
-  throw err;
+  // Attempt 2: Gateway cron.add via WebSocket RPC
+  try {
+    const { gatewayWsRpc } = require('./openclawGatewayClient');
+    const result = await gatewayWsRpc('cron.add', officialPayload);
+    if (result) {
+      const job = result.job || result;
+      const jobId = job.jobId || job.id;
+      const id = job.id || job.jobId;
+      const nowMs = Date.now();
+      logger.info('Cron job created via Gateway cron.add (WS RPC)', { jobId, id, name: payload.name });
+      return fromOfficialFormat({
+        ...job,
+        id,
+        jobId,
+        source: 'gateway',
+        createdAtMs: job.createdAtMs || nowMs,
+        updatedAtMs: job.updatedAtMs || nowMs,
+      });
+    }
+  } catch (wsErr) {
+    if (wsErr.code === 'SERVICE_NOT_CONFIGURED' || wsErr.code === 'SERVICE_UNAVAILABLE') {
+      throw wsErr;
+    }
+    logger.warn('Gateway cron.add (WS RPC) failed, falling back to file write', {
+      error: wsErr.message,
+    });
+  }
+
+  // Attempt 3: Write directly to jobs.json and trigger cron.reload.
+  // OpenClaw assigns jobId and id when it loads the file on reload.
+  // We write without jobId/id so OpenClaw generates them, then re-read
+  // the file after reload to return the assigned identifiers.
+  const existingJobs = await readCronJobs();
+
+  const existingNames = Object.values(existingJobs).map(j => j.name);
+  if (existingNames.includes(normalizedPayload.name)) {
+    const err = new Error(`A cron job with name "${normalizedPayload.name}" already exists`);
+    err.status = 409;
+    err.code = 'DUPLICATE_NAME';
+    throw err;
+  }
+
+  const nowMs = Date.now();
+  // Use a temporary placeholder key so we can locate the job after reload.
+  // OpenClaw will replace this with its own jobId when it processes the file.
+  const tempKey = `__pending__${Date.now()}`;
+  const newJob = {
+    ...officialPayload,
+    source: 'gateway',
+    enabled: payload.enabled !== false,
+    createdAtMs: nowMs,
+    updatedAtMs: nowMs,
+    state: {
+      nextRunAtMs: null,
+      lastRunAtMs: null,
+      lastStatus: null,
+      lastDurationMs: 0,
+      consecutiveErrors: 0,
+    },
+  };
+
+  if (newJob.enabled !== false) {
+    const nextMs = computeNextRunAtMs(newJob);
+    if (nextMs) newJob.state.nextRunAtMs = nextMs;
+  }
+
+  existingJobs[tempKey] = newJob;
+  await writeCronJobs(existingJobs);
+
+  // Re-read to pick up the jobId/id OpenClaw assigned after cron.reload.
+  // Give the Gateway a moment to process the file.
+  await new Promise(resolve => setTimeout(resolve, 1500));
+  const reloadedJobs = await readCronJobs();
+
+  // Find the newly created job by name (most reliable match after reload).
+  const created = Object.values(reloadedJobs).find(j => j.name === normalizedPayload.name);
+  if (created) {
+    logger.info('Cron job created via file fallback', {
+      jobId: created.jobId,
+      id: created.id,
+      name: created.name,
+      sessionTarget: created.sessionTarget,
+    });
+    return fromOfficialFormat(created);
+  }
+
+  // If OpenClaw hasn't processed the file yet, return what we wrote
+  // with the temp key stripped — the job exists but IDs aren't assigned yet.
+  logger.warn('Cron job written but OpenClaw has not yet assigned jobId; returning pending job', {
+    name: normalizedPayload.name,
+  });
+  const { [tempKey]: pendingJob, ...rest } = existingJobs;
+  void rest;
+  return fromOfficialFormat({ ...pendingJob, jobId: null, id: null });
 }
 
 /**
