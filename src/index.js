@@ -4,6 +4,8 @@ const cors = require('cors');
 const helmet = require('helmet');
 const runMigrations = require('./db/runMigrations');
 const logger = require('./utils/logger');
+const { startSessionUsagePoller } = require('./services/sessionUsageService');
+const { startPricingRefreshJob } = require('./services/modelPricingService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -81,6 +83,15 @@ async function start() {
       healthCheck: `http://localhost:${PORT}/health`,
     });
   });
+
+  const pollIntervalMs = parseInt(process.env.SESSION_USAGE_POLL_INTERVAL_MS || '60000', 10);
+  startSessionUsagePoller(pollIntervalMs);
+
+  const pricingRefreshIntervalMs = parseInt(
+    process.env.MODEL_PRICING_REFRESH_INTERVAL_MS || String(7 * 24 * 60 * 60 * 1000),
+    10
+  );
+  startPricingRefreshJob(pricingRefreshIntervalMs);
 }
 
 start();

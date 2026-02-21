@@ -5,6 +5,7 @@ const logger = require('../utils/logger');
 const path = require('path');
 const { requireAdmin } = require('./auth');
 const { makeOpenClawRequest } = require('../services/openclawWorkspaceClient');
+const { estimateCostFromTokens } = require('../services/modelPricingService');
 
 // Auth middleware - require valid JWT
 const requireAuth = (req, res, next) => {
@@ -959,6 +960,7 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
     logger.info('Fetching active sessions from OpenClaw Gateway', { userId: req.user.id });
     
     const { sessionsListAllViaWs, sessionsList, gatewayWsRpc } = require('../services/openclawGatewayClient');
+    const { upsertSessionUsageBatch } = require('../services/sessionUsageService');
 
     // Primary: use the gateway's native WebSocket RPC sessions.list which has global
     // visibility across all agents, including subagent sessions (kind: subagent).
@@ -998,6 +1000,30 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
                 cacheWrite: u.cacheWrite || 0,
               });
             }
+            // Build session metadata map (agent_key, model) for session_usage enrichment
+            const sessionMetaByKey = new Map();
+            for (const s of sessions) {
+              if (!s.key) continue;
+              let agentKey = 'main';
+              if (s.key.startsWith('agent:')) {
+                const parts = s.key.split(':');
+                if (parts.length >= 2) agentKey = parts[1];
+              }
+              let model = null;
+              if (s.modelProvider && s.model) {
+                model = `${s.modelProvider}/${s.model}`;
+              } else if (s.model && typeof s.model === 'string') {
+                model = s.model;
+              } else {
+                const lastMsg = s.messages?.[0];
+                if (lastMsg?.provider && lastMsg?.model) {
+                  model = `${lastMsg.provider}/${lastMsg.model}`;
+                } else if (lastMsg?.model) {
+                  model = lastMsg.model;
+                }
+              }
+              sessionMetaByKey.set(s.key, { agentKey, model });
+            }
             for (const s of sessions) {
               if (s.key && usageMap.has(s.key)) {
                 const ud = usageMap.get(s.key);
@@ -1008,6 +1034,20 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
                 s._cacheWrite = ud.cacheWrite;
               }
             }
+
+            // Enrich usage records with agent_key and model for session_usage persistence
+            const enrichedUsage = usageResult.sessions.map((us) => {
+              const meta = sessionMetaByKey.get(us.key);
+              return {
+                ...us,
+                agent_key: meta?.agentKey,
+                model: meta?.model ?? undefined,
+              };
+            });
+            // Persist latest usage totals to session_usage table (fire-and-forget)
+            upsertSessionUsageBatch(enrichedUsage).catch(err => {
+              logger.warn('Failed to persist session usage from sessions endpoint', { error: err.message });
+            });
           }
           // Store aggregate daily cost for the response
           sessions._dailyCost = costResult?.totals?.totalCost || 0;
@@ -1133,7 +1173,9 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
       const outputTokens = session._usageOutput || session.outputTokens || (usage.output || 0);
       const cacheReadTokens = session._cacheRead || usage.cacheRead || 0;
       const cacheWriteTokens = session._cacheWrite || usage.cacheWrite || 0;
-      const messageCost = session._totalCost || usage.cost?.total || 0;
+      const messageCost = session._totalCost || usage.cost?.total
+        || estimateCostFromTokens(model, inputTokens, outputTokens)
+        || 0;
       
       // Context window usage
       const contextTokens = session.contextTokens || 0; // Total context window size
@@ -1779,9 +1821,11 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
         const outputTokens = latestRun?.output ?? matchedSession?.outputTokens ?? 0;
         const cacheReadTokens = latestRun?.cacheRead ?? 0;
         const cacheWriteTokens = latestRun?.cacheWrite ?? 0;
-        const messageCost = latestRun?.totalCost ?? 0;
-        const todayTotalCost = usageAgg?.totalCost ?? 0;
         const actualModel = matchedSession?.model || null;
+        const messageCost = latestRun?.totalCost
+          || estimateCostFromTokens(actualModel, inputTokens, outputTokens)
+          || 0;
+        const todayTotalCost = usageAgg?.totalCost ?? 0;
         const contextTokens = matchedSession?.contextTokens || 0;
         const totalTokensUsed = latestRun?.totalTokens ?? matchedSession?.totalTokens ?? 0;
         const contextUsagePercent = contextTokens > 0
@@ -2244,6 +2288,169 @@ router.delete('/cron-jobs/:jobId', requireAuth, requireAdmin, async (req, res, n
     await deleteCronJob(jobId);
 
     res.json({ data: { success: true } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/v1/openclaw/usage
+// Returns aggregated usage and cost data from session_usage_hourly.
+// Query params:
+//   range   — today | 24h | 3d | 7d | 14d | 30d | 3m | 6m  (default: 7d)
+//   groupBy — hour | day  (default: hour for <=7d, day for longer ranges)
+router.get('/usage', requireAuth, async (req, res, next) => {
+  try {
+    const pool = require('../db/pool');
+
+    const VALID_RANGES = ['today', '24h', '3d', '7d', '14d', '30d', '3m', '6m'];
+    const range = VALID_RANGES.includes(req.query.range) ? req.query.range : '7d';
+
+    // Determine the start timestamp for the requested range
+    const now = new Date();
+    let startAt;
+    switch (range) {
+      case 'today':
+        startAt = new Date(now);
+        startAt.setUTCHours(0, 0, 0, 0);
+        break;
+      case '24h':
+        startAt = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        break;
+      case '3d':
+        startAt = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000);
+        break;
+      case '7d':
+        startAt = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        break;
+      case '14d':
+        startAt = new Date(now.getTime() - 14 * 24 * 60 * 60 * 1000);
+        break;
+      case '30d':
+        startAt = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        break;
+      case '3m':
+        startAt = new Date(now.getTime() - 90 * 24 * 60 * 60 * 1000);
+        break;
+      case '6m':
+        startAt = new Date(now.getTime() - 180 * 24 * 60 * 60 * 1000);
+        break;
+      default:
+        startAt = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+    }
+
+    // Auto-select groupBy based on range unless explicitly provided
+    const shortRanges = ['today', '24h', '3d', '7d'];
+    const defaultGroupBy = shortRanges.includes(range) ? 'hour' : 'day';
+    const groupBy = req.query.groupBy === 'day' ? 'day' : (req.query.groupBy === 'hour' ? 'hour' : defaultGroupBy);
+
+    logger.info('Fetching usage analytics', { userId: req.user.id, range, groupBy });
+
+    // Summary totals
+    const summaryResult = await pool.query(
+      `SELECT
+         COALESCE(SUM(cost_usd), 0)           AS total_cost_usd,
+         COALESCE(SUM(tokens_input), 0)        AS total_tokens_input,
+         COALESCE(SUM(tokens_output), 0)       AS total_tokens_output,
+         COALESCE(SUM(tokens_cache_read), 0)   AS total_tokens_cache_read,
+         COALESCE(SUM(tokens_cache_write), 0)  AS total_tokens_cache_write,
+         COUNT(DISTINCT session_key)           AS session_count
+       FROM session_usage_hourly
+       WHERE hour_bucket >= $1`,
+      [startAt]
+    );
+
+    // Time-series bucketed by hour or day
+    const timeSeriesResult = await pool.query(
+      `SELECT
+         date_trunc($1, hour_bucket)           AS bucket,
+         COALESCE(SUM(cost_usd), 0)            AS cost_usd,
+         COALESCE(SUM(tokens_input), 0)        AS tokens_input,
+         COALESCE(SUM(tokens_output), 0)       AS tokens_output,
+         COALESCE(SUM(tokens_cache_read), 0)   AS tokens_cache_read,
+         COALESCE(SUM(tokens_cache_write), 0)  AS tokens_cache_write
+       FROM session_usage_hourly
+       WHERE hour_bucket >= $2
+       GROUP BY 1
+       ORDER BY 1 ASC`,
+      [groupBy, startAt]
+    );
+
+    // Breakdown by agent
+    const byAgentResult = await pool.query(
+      `SELECT
+         agent_key,
+         COALESCE(SUM(cost_usd), 0)            AS cost_usd,
+         COALESCE(SUM(tokens_input), 0)        AS tokens_input,
+         COALESCE(SUM(tokens_output), 0)       AS tokens_output,
+         COALESCE(SUM(tokens_cache_read), 0)   AS tokens_cache_read,
+         COALESCE(SUM(tokens_cache_write), 0)  AS tokens_cache_write,
+         COUNT(DISTINCT session_key)           AS session_count
+       FROM session_usage_hourly
+       WHERE hour_bucket >= $1
+       GROUP BY agent_key
+       ORDER BY cost_usd DESC`,
+      [startAt]
+    );
+
+    // Breakdown by model
+    const byModelResult = await pool.query(
+      `SELECT
+         model,
+         COALESCE(SUM(cost_usd), 0)            AS cost_usd,
+         COALESCE(SUM(tokens_input), 0)        AS tokens_input,
+         COALESCE(SUM(tokens_output), 0)       AS tokens_output,
+         COALESCE(SUM(tokens_cache_read), 0)   AS tokens_cache_read,
+         COALESCE(SUM(tokens_cache_write), 0)  AS tokens_cache_write,
+         COUNT(DISTINCT session_key)           AS session_count
+       FROM session_usage_hourly
+       WHERE hour_bucket >= $1
+       GROUP BY model
+       ORDER BY cost_usd DESC`,
+      [startAt]
+    );
+
+    const s = summaryResult.rows[0];
+
+    res.json({
+      data: {
+        range,
+        groupBy,
+        summary: {
+          totalCostUsd:          parseFloat(s.total_cost_usd),
+          totalTokensInput:      parseInt(s.total_tokens_input, 10),
+          totalTokensOutput:     parseInt(s.total_tokens_output, 10),
+          totalTokensCacheRead:  parseInt(s.total_tokens_cache_read, 10),
+          totalTokensCacheWrite: parseInt(s.total_tokens_cache_write, 10),
+          sessionCount:          parseInt(s.session_count, 10),
+        },
+        timeSeries: timeSeriesResult.rows.map((r) => ({
+          bucket:          r.bucket,
+          costUsd:         parseFloat(r.cost_usd),
+          tokensInput:     parseInt(r.tokens_input, 10),
+          tokensOutput:    parseInt(r.tokens_output, 10),
+          tokensCacheRead: parseInt(r.tokens_cache_read, 10),
+          tokensCacheWrite: parseInt(r.tokens_cache_write, 10),
+        })),
+        byAgent: byAgentResult.rows.map((r) => ({
+          agentKey:        r.agent_key,
+          costUsd:         parseFloat(r.cost_usd),
+          tokensInput:     parseInt(r.tokens_input, 10),
+          tokensOutput:    parseInt(r.tokens_output, 10),
+          tokensCacheRead: parseInt(r.tokens_cache_read, 10),
+          tokensCacheWrite: parseInt(r.tokens_cache_write, 10),
+          sessionCount:    parseInt(r.session_count, 10),
+        })),
+        byModel: byModelResult.rows.map((r) => ({
+          model:           r.model,
+          costUsd:         parseFloat(r.cost_usd),
+          tokensInput:     parseInt(r.tokens_input, 10),
+          tokensOutput:    parseInt(r.tokens_output, 10),
+          tokensCacheRead: parseInt(r.tokens_cache_read, 10),
+          tokensCacheWrite: parseInt(r.tokens_cache_write, 10),
+          sessionCount:    parseInt(r.session_count, 10),
+        })),
+      },
+    });
   } catch (error) {
     next(error);
   }
