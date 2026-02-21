@@ -448,7 +448,7 @@ function parseJsonWithLiteralNewlines(str) {
  * @param {number}  params.limit          - Max sessions to return (0 = no limit)
  * @returns {Promise<object>} Raw sessions.list payload from the gateway
  */
-async function sessionsListAllViaWs({ includeGlobal = true, includeUnknown = false, activeMinutes = 0, limit = 0 } = {}) {
+async function sessionsListAllViaWs({ includeGlobal = true, includeUnknown = false, activeMinutes = 0, limit = 0, messageLimit = 0 } = {}) {
   const isProduction = process.env.NODE_ENV === 'production';
   const gatewayUrl = process.env.OPENCLAW_GATEWAY_URL ||
     (isProduction ? 'http://openclaw.agents.svc.cluster.local:18789' : null);
@@ -540,6 +540,7 @@ async function sessionsListAllViaWs({ includeGlobal = true, includeUnknown = fal
         const params = { includeGlobal, includeUnknown };
         if (activeMinutes > 0) params.activeMinutes = activeMinutes;
         if (limit > 0) params.limit = limit;
+        if (messageLimit > 0) params.messageLimit = messageLimit;
 
         const result = await send('sessions.list', params);
 

@@ -1416,7 +1416,7 @@ router.delete('/sessions', requireAuth, requireAdmin, async (req, res, next) => 
     const { gatewayWsRpc } = require('../services/openclawGatewayClient');
 
     try {
-      await gatewayWsRpc('sessions.delete', { sessionKey });
+      await gatewayWsRpc('sessions.delete', { key: sessionKey });
       logger.info('Session deleted via Gateway sessions.delete', { sessionKey });
       return res.status(204).send();
     } catch (rpcErr) {
@@ -1431,6 +1431,19 @@ router.delete('/sessions', requireAuth, requireAdmin, async (req, res, next) => 
             message: 'Session deletion is not supported by the OpenClaw Gateway. The sessions.delete RPC may not be available in this Gateway version.',
             status: 501,
             code: 'NOT_IMPLEMENTED'
+          }
+        });
+      }
+      if (msg.includes('webchat') || msg.includes('cannot delete')) {
+        logger.warn('Gateway does not allow session deletion', {
+          sessionKey,
+          error: rpcErr.message
+        });
+        return res.status(403).json({
+          error: {
+            message: 'Session deletion is not allowed. The OpenClaw Gateway restricts session deletion for security reasons.',
+            status: 403,
+            code: 'FORBIDDEN'
           }
         });
       }
@@ -2469,22 +2482,56 @@ router.delete('/cron-jobs/:jobId', requireAuth, requireAdmin, async (req, res, n
 // GET /api/v1/openclaw/usage
 // Returns aggregated usage and cost data from session_usage_hourly.
 // Query params:
-//   range   — today | 24h | 3d | 7d | 14d | 30d | 3m | 6m  (default: 7d)
-//   groupBy — hour | day  (default: hour for <=7d, day for longer ranges)
+//   range     — today | 24h | 3d | 7d | 14d | 30d | 3m | 6m  (default: 7d)
+//   groupBy   — hour | day  (default: hour for <=7d, day for longer ranges)
+//   timezone  — IANA timezone (e.g., "America/New_York") for "today" calculation (optional, defaults to UTC)
+//              When range="today", calculates the start of "today" in the specified timezone.
 router.get('/usage', requireAuth, async (req, res, next) => {
   try {
     const pool = require('../db/pool');
 
     const VALID_RANGES = ['today', '24h', '3d', '7d', '14d', '30d', '3m', '6m'];
     const range = VALID_RANGES.includes(req.query.range) ? req.query.range : '7d';
+    const timezone = req.query.timezone || 'UTC';
 
     // Determine the start timestamp for the requested range
     const now = new Date();
     let startAt;
     switch (range) {
       case 'today':
-        startAt = new Date(now);
-        startAt.setUTCHours(0, 0, 0, 0);
+        // Calculate start of "today" in the user's timezone, then convert to UTC
+        // Get today's date components in the target timezone
+        const formatter = new Intl.DateTimeFormat('en-US', {
+          timeZone: timezone,
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+        });
+        const parts = formatter.formatToParts(now);
+        const year = parts.find(p => p.type === 'year').value;
+        const month = parts.find(p => p.type === 'month').value;
+        const day = parts.find(p => p.type === 'day').value;
+        
+        // Create a date at noon UTC on today's date (using noon avoids DST edge cases)
+        const noonUTC = new Date(`${year}-${month}-${day}T12:00:00Z`);
+        
+        // Format noon UTC in the target timezone to see what time it is there
+        const noonInTzFormatter = new Intl.DateTimeFormat('en-US', {
+          timeZone: timezone,
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: false,
+        });
+        const noonInTzParts = noonInTzFormatter.formatToParts(noonUTC);
+        const noonHour = parseInt(noonInTzParts.find(p => p.type === 'hour').value, 10);
+        const noonMin = parseInt(noonInTzParts.find(p => p.type === 'minute').value, 10);
+        const noonSec = parseInt(noonInTzParts.find(p => p.type === 'second').value, 10);
+        
+        // Calculate offset: if noon UTC is 14:00 in target TZ, offset is +2 hours
+        // To get midnight in target TZ, we need to go back from noon UTC by (noonHour * 60 + noonMin) minutes
+        const offsetMinutes = noonHour * 60 + noonMin + (noonSec / 60);
+        startAt = new Date(noonUTC.getTime() - offsetMinutes * 60 * 1000);
         break;
       case '24h':
         startAt = new Date(now.getTime() - 24 * 60 * 60 * 1000);
