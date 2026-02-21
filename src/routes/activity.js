@@ -87,13 +87,12 @@ router.get('/feed', async (req, res, next) => {
       activityRows = result.rows;
     }
 
-    // --- Cron last-execution entries ---
-    // session_usage only stores individual run entries (agent:*:cron:*:run:*).
-    // We aggregate per parent job key (everything before ":run:"), taking the
-    // most recent run per job as the representative feed entry.
+    // --- Cron execution entries ---
+    // session_usage stores individual run entries (agent:*:cron:*:run:*).
+    // Show all cron runs, not just the latest per job, so users can see the full history.
     if (source === 'all' || source === 'cron') {
       // Extract parent key: "agent:coo:cron:<jobId>:run:<runId>" -> "agent:coo:cron:<jobId>"
-      // Extract agent_key from parent key when the column is empty (older rows).
+      // Extract agent_key from session_key when column is null (older rows).
       let cronQuery = `
         WITH run_entries AS (
           SELECT
@@ -108,43 +107,48 @@ router.get('/feed', async (req, res, next) => {
             COALESCE(
               su.agent_key,
               (regexp_match(su.session_key, '^agent:([^:]+):'))[1]
-            ) AS resolved_agent_key
+            ) AS resolved_agent_key,
+            -- Round timestamp to nearest second to group runs that happened at the same time
+            date_trunc('second', su.first_seen_at) AS run_time_second
           FROM session_usage su
           WHERE su.session_key LIKE 'agent:%:cron:%'
         ),
-        latest_per_job AS (
-          SELECT DISTINCT ON (parent_key)
-            parent_key,
-            session_key,
-            resolved_agent_key,
-            label,
-            model,
-            tokens_input,
-            tokens_output,
-            cost_usd,
-            last_updated_at
-          FROM run_entries
-          ORDER BY parent_key, last_updated_at DESC
+        deduplicated_runs AS (
+          -- Deduplicate: if multiple session_keys exist for the same job at the same second,
+          -- take the one with the most recent last_updated_at (most complete/final state)
+          SELECT DISTINCT ON (re.parent_key, re.run_time_second)
+            re.session_key,
+            re.first_seen_at,
+            re.last_updated_at,
+            re.label,
+            re.parent_key,
+            re.resolved_agent_key,
+            re.model,
+            re.tokens_input,
+            re.tokens_output,
+            re.cost_usd
+          FROM run_entries re
+          ORDER BY re.parent_key, re.run_time_second, re.last_updated_at DESC
         )
         SELECT
-          lj.parent_key                                    AS id,
+          dr.session_key                                    AS id,
           'cron'                                           AS source,
-          lj.last_updated_at                               AS timestamp,
-          COALESCE(lj.label, lj.parent_key)               AS title,
+          dr.first_seen_at                                 AS timestamp,
+          COALESCE(dr.label, dr.parent_key)               AS title,
           NULL::text                                       AS description,
           NULL::text                                       AS category,
-          lj.resolved_agent_key                            AS agent_id,
+          dr.resolved_agent_key                            AS agent_id,
           NULL::uuid                                       AS task_id,
           NULL::text                                       AS task_title,
           u.name                                           AS agent_name,
-          lj.parent_key                                    AS job_id,
-          COALESCE(lj.label, lj.parent_key)               AS job_name,
-          lj.model,
-          lj.tokens_input,
-          lj.tokens_output,
-          lj.cost_usd
-        FROM latest_per_job lj
-        LEFT JOIN users u ON u.agent_id = lj.resolved_agent_key
+          dr.parent_key                                    AS job_id,
+          COALESCE(dr.label, dr.parent_key)               AS job_name,
+          dr.model,
+          dr.tokens_input,
+          dr.tokens_output,
+          dr.cost_usd
+        FROM deduplicated_runs dr
+        LEFT JOIN users u ON u.agent_id = dr.resolved_agent_key
         WHERE 1=1
       `;
       const cronParams = [];
@@ -152,19 +156,20 @@ router.get('/feed', async (req, res, next) => {
 
       if (agent_id) {
         // filter inside the CTE result — resolved_agent_key is exposed as agent_id alias
-        cronQuery += ` AND lj.resolved_agent_key = $${cp++}`;
+        cronQuery += ` AND dr.resolved_agent_key = $${cp++}`;
         cronParams.push(agent_id);
       }
       if (start_date) {
-        cronQuery += ` AND lj.last_updated_at >= $${cp++}`;
+        cronQuery += ` AND dr.first_seen_at >= $${cp++}`;
         cronParams.push(start_date);
       }
       if (end_date) {
-        cronQuery += ` AND lj.last_updated_at <= $${cp++}`;
+        cronQuery += ` AND dr.first_seen_at <= $${cp++}`;
         cronParams.push(end_date);
       }
 
-      cronQuery += ` ORDER BY lj.last_updated_at DESC`;
+      // Order by timestamp DESC to show most recent runs first
+      cronQuery += ` ORDER BY dr.first_seen_at DESC`;
 
       try {
         const cronResult = await pool.query(cronQuery, cronParams);
