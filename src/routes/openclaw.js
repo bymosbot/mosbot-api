@@ -2409,6 +2409,32 @@ router.get('/usage', requireAuth, async (req, res, next) => {
       [startAt]
     );
 
+    // Breakdown by cron job (only rows where job_id is set)
+    // job_label is derived from the first session_key seen for that job:
+    //   "agent:<agentId>:cron:<jobId>:run:<sessionId>" -> label stored in session_usage
+    // We use a subquery to pick a representative label from session_usage.
+    const byJobResult = await pool.query(
+      `SELECT
+         h.job_id,
+         (SELECT su.label
+          FROM session_usage su
+          WHERE su.job_id = h.job_id AND su.label IS NOT NULL
+          LIMIT 1)                                AS job_label,
+         MIN(h.agent_key)                         AS agent_key,
+         COALESCE(SUM(h.cost_usd), 0)             AS cost_usd,
+         COALESCE(SUM(h.tokens_input), 0)         AS tokens_input,
+         COALESCE(SUM(h.tokens_output), 0)        AS tokens_output,
+         COALESCE(SUM(h.tokens_cache_read), 0)    AS tokens_cache_read,
+         COALESCE(SUM(h.tokens_cache_write), 0)   AS tokens_cache_write,
+         COUNT(DISTINCT h.session_key)            AS run_count
+       FROM session_usage_hourly h
+       WHERE h.hour_bucket >= $1
+         AND h.job_id IS NOT NULL
+       GROUP BY h.job_id
+       ORDER BY cost_usd DESC`,
+      [startAt]
+    );
+
     const s = summaryResult.rows[0];
 
     res.json({
@@ -2424,30 +2450,41 @@ router.get('/usage', requireAuth, async (req, res, next) => {
           sessionCount:          parseInt(s.session_count, 10),
         },
         timeSeries: timeSeriesResult.rows.map((r) => ({
-          bucket:          r.bucket,
-          costUsd:         parseFloat(r.cost_usd),
-          tokensInput:     parseInt(r.tokens_input, 10),
-          tokensOutput:    parseInt(r.tokens_output, 10),
-          tokensCacheRead: parseInt(r.tokens_cache_read, 10),
+          bucket:           r.bucket,
+          costUsd:          parseFloat(r.cost_usd),
+          tokensInput:      parseInt(r.tokens_input, 10),
+          tokensOutput:     parseInt(r.tokens_output, 10),
+          tokensCacheRead:  parseInt(r.tokens_cache_read, 10),
           tokensCacheWrite: parseInt(r.tokens_cache_write, 10),
         })),
         byAgent: byAgentResult.rows.map((r) => ({
-          agentKey:        r.agent_key,
-          costUsd:         parseFloat(r.cost_usd),
-          tokensInput:     parseInt(r.tokens_input, 10),
-          tokensOutput:    parseInt(r.tokens_output, 10),
-          tokensCacheRead: parseInt(r.tokens_cache_read, 10),
+          agentKey:         r.agent_key,
+          costUsd:          parseFloat(r.cost_usd),
+          tokensInput:      parseInt(r.tokens_input, 10),
+          tokensOutput:     parseInt(r.tokens_output, 10),
+          tokensCacheRead:  parseInt(r.tokens_cache_read, 10),
           tokensCacheWrite: parseInt(r.tokens_cache_write, 10),
-          sessionCount:    parseInt(r.session_count, 10),
+          sessionCount:     parseInt(r.session_count, 10),
         })),
         byModel: byModelResult.rows.map((r) => ({
-          model:           r.model,
-          costUsd:         parseFloat(r.cost_usd),
-          tokensInput:     parseInt(r.tokens_input, 10),
-          tokensOutput:    parseInt(r.tokens_output, 10),
-          tokensCacheRead: parseInt(r.tokens_cache_read, 10),
+          model:            r.model,
+          costUsd:          parseFloat(r.cost_usd),
+          tokensInput:      parseInt(r.tokens_input, 10),
+          tokensOutput:     parseInt(r.tokens_output, 10),
+          tokensCacheRead:  parseInt(r.tokens_cache_read, 10),
           tokensCacheWrite: parseInt(r.tokens_cache_write, 10),
-          sessionCount:    parseInt(r.session_count, 10),
+          sessionCount:     parseInt(r.session_count, 10),
+        })),
+        byJob: byJobResult.rows.map((r) => ({
+          jobId:            r.job_id,
+          jobLabel:         r.job_label || null,
+          agentKey:         r.agent_key,
+          costUsd:          parseFloat(r.cost_usd),
+          tokensInput:      parseInt(r.tokens_input, 10),
+          tokensOutput:     parseInt(r.tokens_output, 10),
+          tokensCacheRead:  parseInt(r.tokens_cache_read, 10),
+          tokensCacheWrite: parseInt(r.tokens_cache_write, 10),
+          runCount:         parseInt(r.run_count, 10),
         })),
       },
     });

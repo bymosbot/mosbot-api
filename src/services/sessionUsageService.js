@@ -32,6 +32,26 @@ function extractModel(s) {
 }
 
 /**
+ * Extract the cron job UUID from a session key.
+ * Session key format for cron runs:
+ *   "agent:<agentId>:cron:<jobId>:run:<sessionId>"
+ * Returns null for all other session kinds (main, subagent, hook, etc.).
+ *
+ * @param {string} key
+ * @returns {string|null}
+ */
+function deriveJobIdFromSessionKey(key) {
+  if (!key || typeof key !== 'string') return null;
+  const parts = key.split(':');
+  // agent : agentId : cron : jobId : run : sessionId
+  //   0       1        2      3       4       5
+  if (parts[0] === 'agent' && parts[2] === 'cron' && parts.length >= 4) {
+    return parts[3] || null;
+  }
+  return null;
+}
+
+/**
  * Truncate a timestamp down to the start of its UTC hour.
  *
  * @param {Date} date
@@ -60,7 +80,7 @@ function toHourBucket(date) {
  * cumulative stored in session_usage, then accumulated into the current
  * hour bucket in session_usage_hourly.
  *
- * @param {Array<{ key: string, usage: object, agentKey?: string, agent_key?: string, model?: string, modelProvider?: string }>} sessions
+ * @param {Array<{ key: string, usage: object, agentKey?: string, agent_key?: string, model?: string, modelProvider?: string, jobId?: string, job_id?: string }>} sessions
  */
 async function upsertSessionUsageBatch(sessions) {
   if (!sessions || sessions.length === 0) return;
@@ -88,6 +108,8 @@ async function upsertSessionUsageBatch(sessions) {
       const u = s.usage || {};
       const agentKey = s.agentKey ?? s.agent_key ?? deriveAgentKeyFromSessionKey(s.key);
       const model = extractModel(s);
+      const jobId = s.job_id ?? s.jobId ?? deriveJobIdFromSessionKey(s.key);
+      const label = s.label ?? s.sessionLabel ?? null;
 
       const newInput       = u.input      || 0;
       const newOutput      = u.output     || 0;
@@ -98,18 +120,20 @@ async function upsertSessionUsageBatch(sessions) {
       // Upsert cumulative snapshot into session_usage
       await client.query(
         `INSERT INTO session_usage
-           (session_key, agent_key, model, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, cost_usd, last_updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+           (session_key, agent_key, model, job_id, label, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, cost_usd, last_updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
          ON CONFLICT (session_key) DO UPDATE SET
            agent_key          = COALESCE(EXCLUDED.agent_key, session_usage.agent_key),
            model              = COALESCE(EXCLUDED.model, session_usage.model),
+           job_id             = COALESCE(EXCLUDED.job_id, session_usage.job_id),
+           label              = COALESCE(EXCLUDED.label, session_usage.label),
            tokens_input       = EXCLUDED.tokens_input,
            tokens_output      = EXCLUDED.tokens_output,
            tokens_cache_read  = EXCLUDED.tokens_cache_read,
            tokens_cache_write = EXCLUDED.tokens_cache_write,
            cost_usd           = EXCLUDED.cost_usd,
            last_updated_at    = NOW()`,
-        [s.key, agentKey, model, newInput, newOutput, newCacheRead, newCacheWrite, newCost]
+        [s.key, agentKey, model, jobId, label, newInput, newOutput, newCacheRead, newCacheWrite, newCost]
       );
 
       // Compute deltas against previous cumulative (clamp to 0 to handle resets)
@@ -128,17 +152,18 @@ async function upsertSessionUsageBatch(sessions) {
       // Accumulate deltas into the current hour bucket in session_usage_hourly
       await client.query(
         `INSERT INTO session_usage_hourly
-           (session_key, agent_key, model, hour_bucket, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, cost_usd)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+           (session_key, agent_key, model, job_id, hour_bucket, tokens_input, tokens_output, tokens_cache_read, tokens_cache_write, cost_usd)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (session_key, hour_bucket) DO UPDATE SET
            agent_key          = COALESCE(EXCLUDED.agent_key, session_usage_hourly.agent_key),
            model              = COALESCE(EXCLUDED.model, session_usage_hourly.model),
+           job_id             = COALESCE(EXCLUDED.job_id, session_usage_hourly.job_id),
            tokens_input       = session_usage_hourly.tokens_input       + EXCLUDED.tokens_input,
            tokens_output      = session_usage_hourly.tokens_output      + EXCLUDED.tokens_output,
            tokens_cache_read  = session_usage_hourly.tokens_cache_read  + EXCLUDED.tokens_cache_read,
            tokens_cache_write = session_usage_hourly.tokens_cache_write + EXCLUDED.tokens_cache_write,
            cost_usd           = session_usage_hourly.cost_usd           + EXCLUDED.cost_usd`,
-        [s.key, agentKey, model, hourBucket, deltaInput, deltaOutput, deltaCacheRead, deltaCacheWrite, deltaCost]
+        [s.key, agentKey, model, jobId, hourBucket, deltaInput, deltaOutput, deltaCacheRead, deltaCacheWrite, deltaCost]
       );
     }
 
