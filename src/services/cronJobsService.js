@@ -68,11 +68,17 @@ function computeNextRunAtMs(job) {
  * The client now sends the official schema directly — payload.kind is explicit
  * (agentTurn or systemEvent) rather than being derived from sessionTarget.
  * This function normalises legacy shapes and fills in defaults.
+ *
+ * PATCH semantics: only fields explicitly present in clientPayload are included
+ * in the output. Fields absent from clientPayload are omitted so they don't
+ * accidentally overwrite stored values during partial updates.
  */
 function toOfficialFormat(clientPayload) {
   const official = {};
 
-  official.name = clientPayload.name;
+  if (clientPayload.name !== undefined) {
+    official.name = clientPayload.name;
+  }
   if (clientPayload.description !== undefined) {
     official.description = clientPayload.description;
   }
@@ -87,34 +93,46 @@ function toOfficialFormat(clientPayload) {
     }
   }
 
-  // Session target
-  const sessionTarget = clientPayload.sessionTarget || 'main';
-  official.sessionTarget = sessionTarget;
+  // Session target — only include when explicitly provided.
+  // For agentTurn jobs, 'isolated' is the only valid value; enforce it here
+  // so legacy jobs created without sessionTarget get corrected on next write.
+  if (clientPayload.sessionTarget !== undefined) {
+    official.sessionTarget = clientPayload.sessionTarget;
+  }
 
-  // Wake mode
-  official.wakeMode = clientPayload.wakeMode || 'now';
+  // Wake mode — only include when explicitly provided
+  if (clientPayload.wakeMode !== undefined) {
+    official.wakeMode = clientPayload.wakeMode;
+  }
 
   // Payload — use explicit kind from client; fall back to legacy derivation
-  const srcPayload = clientPayload.payload || {};
-  const payloadKind = srcPayload.kind || (sessionTarget === 'isolated' ? 'agentTurn' : 'systemEvent');
+  if (clientPayload.payload !== undefined) {
+    const srcPayload = clientPayload.payload || {};
+    // Determine sessionTarget for kind inference: prefer explicit value, then
+    // fall back to the payload kind hint.
+    const sessionTarget = clientPayload.sessionTarget;
+    const payloadKind = srcPayload.kind || (sessionTarget === 'isolated' ? 'agentTurn' : 'systemEvent');
 
-  if (payloadKind === 'agentTurn') {
-    official.payload = {
-      kind: 'agentTurn',
-      message: srcPayload.message || srcPayload.text || srcPayload.prompt || '',
-    };
-    if (srcPayload.model) {
-      official.payload.model = srcPayload.model;
+    if (payloadKind === 'agentTurn') {
+      official.payload = {
+        kind: 'agentTurn',
+        message: srcPayload.message || srcPayload.text || srcPayload.prompt || '',
+      };
+      if (srcPayload.model) {
+        official.payload.model = srcPayload.model;
+      }
+      // agentTurn always requires isolated — enforce it unconditionally
+      official.sessionTarget = 'isolated';
+    } else {
+      official.payload = {
+        kind: 'systemEvent',
+        text: srcPayload.text || srcPayload.message || srcPayload.prompt || '',
+      };
     }
-  } else {
-    official.payload = {
-      kind: 'systemEvent',
-      text: srcPayload.text || srcPayload.message || srcPayload.prompt || '',
-    };
   }
 
   // Agent binding
-  if (clientPayload.agentId) {
+  if (clientPayload.agentId !== undefined) {
     official.agentId = clientPayload.agentId;
   }
 
@@ -250,15 +268,31 @@ async function readCronJobs() {
       jobsMap = parsed;
     }
 
-    // If we repaired the file, rewrite it now with clean JSON so future reads
-    // don't need to repair again.
-    if (wasRepaired) {
-      logger.info('jobs.json auto-repair succeeded — rewriting with clean JSON', {
+    // Migration: agentTurn jobs must have sessionTarget='isolated'.
+    // Fix any legacy jobs that were stored with sessionTarget='main' (the old
+    // incorrect default) so every subsequent run gets a fresh context.
+    let migrationNeeded = false;
+    for (const job of Object.values(jobsMap)) {
+      if (job.payload?.kind === 'agentTurn' && job.sessionTarget !== 'isolated') {
+        logger.info('jobs.json migration: correcting sessionTarget to "isolated" for agentTurn job', {
+          jobId: job.jobId,
+          name: job.name,
+          was: job.sessionTarget,
+        });
+        job.sessionTarget = 'isolated';
+        migrationNeeded = true;
+      }
+    }
+
+    // If we repaired the file or migrated any jobs, rewrite with clean JSON.
+    if (wasRepaired || migrationNeeded) {
+      logger.info('jobs.json rewrite triggered', {
         path: CRON_JOBS_PATH,
         count: Object.keys(jobsMap).length,
+        reason: wasRepaired ? 'auto-repair' : 'sessionTarget migration',
       });
       writeCronJobs(jobsMap).catch(writeErr => {
-        logger.warn('jobs.json auto-repair: could not rewrite fixed file', { error: writeErr.message });
+        logger.warn('jobs.json rewrite failed', { error: writeErr.message });
       });
     }
 
@@ -434,7 +468,14 @@ function validateCronJob(job) {
  * @returns {Promise<Object>} Created job
  */
 async function createCronJob(payload) {
-  const validation = validateCronJob(payload);
+  // Enforce isolated session for agentTurn jobs before validation so callers
+  // that omit sessionTarget get the correct default rather than a validation error.
+  const normalizedPayload = { ...payload };
+  if (normalizedPayload.payload?.kind === 'agentTurn' && !normalizedPayload.sessionTarget) {
+    normalizedPayload.sessionTarget = 'isolated';
+  }
+
+  const validation = validateCronJob(normalizedPayload);
   if (!validation.valid) {
     const err = new Error(`Invalid cron job: ${validation.errors.join(', ')}`);
     err.status = 400;
@@ -443,7 +484,7 @@ async function createCronJob(payload) {
     throw err;
   }
 
-  const officialPayload = toOfficialFormat(payload);
+  const officialPayload = toOfficialFormat(normalizedPayload);
 
   // Try Gateway cron.add first
   try {
@@ -474,11 +515,11 @@ async function createCronJob(payload) {
   // Fallback: write directly to jobs.json
   const jobs = await readCronJobs();
   const existingIds = Object.keys(jobs);
-  const jobId = payload.jobId || slugifyJobId(payload.name, existingIds);
+  const jobId = normalizedPayload.jobId || slugifyJobId(normalizedPayload.name, existingIds);
 
   const existingNames = Object.values(jobs).map(j => j.name);
-  if (existingNames.includes(payload.name)) {
-    const err = new Error(`A cron job with name "${payload.name}" already exists`);
+  if (existingNames.includes(normalizedPayload.name)) {
+    const err = new Error(`A cron job with name "${normalizedPayload.name}" already exists`);
     err.status = 409;
     err.code = 'DUPLICATE_NAME';
     throw err;
@@ -512,7 +553,7 @@ async function createCronJob(payload) {
   jobs[jobId] = newJob;
   await writeCronJobs(jobs);
 
-  logger.info('Cron job created via file fallback', { jobId, name: newJob.name });
+  logger.info('Cron job created via file fallback', { jobId, name: newJob.name, sessionTarget: newJob.sessionTarget });
   return fromOfficialFormat(newJob);
 }
 

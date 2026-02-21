@@ -905,6 +905,68 @@ router.get('/:id/activity', optionalAuth, validateUUID('id'), async (req, res, n
   }
 });
 
+// GET /api/v1/tasks/:id/timeline - Get unified timeline of comments + task_log events
+// Returns merged, chronological feed (oldest first) for the Comments tab.
+// Excludes COMMENT_* event types (redundant — the comment itself is shown).
+router.get('/:id/timeline', optionalAuth, validateUUID('id'), async (req, res, next) => {
+  try {
+    const { id } = req.params;
+
+    const taskExists = await pool.query('SELECT id FROM tasks WHERE id = $1', [id]);
+    if (taskExists.rows.length === 0) {
+      return res.status(404).json({ error: { message: 'Task not found', status: 404 } });
+    }
+
+    const [commentsResult, eventsResult] = await Promise.all([
+      pool.query(
+        `SELECT
+           c.id,
+           'comment' AS type,
+           c.body,
+           c.author_id,
+           u.name  AS author_name,
+           u.email AS author_email,
+           u.avatar_url AS author_avatar,
+           c.created_at,
+           c.updated_at,
+           c.created_at AS occurred_at
+         FROM task_comments c
+         LEFT JOIN users u ON u.id = c.author_id
+         WHERE c.task_id = $1`,
+        [id]
+      ),
+      pool.query(
+        `SELECT
+           tl.id,
+           'event' AS type,
+           tl.event_type,
+           tl.actor_id,
+           u.name  AS actor_name,
+           u.email AS actor_email,
+           tl.occurred_at,
+           tl.meta,
+           tl.old_values,
+           tl.new_values,
+           tl.source,
+           tl.occurred_at AS occurred_at
+         FROM task_logs tl
+         LEFT JOIN users u ON u.id = tl.actor_id
+         WHERE tl.task_id = $1
+           AND tl.event_type NOT IN ('COMMENT_CREATED', 'COMMENT_UPDATED', 'COMMENT_DELETED')`,
+        [id]
+      ),
+    ]);
+
+    const items = [...commentsResult.rows, ...eventsResult.rows].sort(
+      (a, b) => new Date(a.occurred_at) - new Date(b.occurred_at)
+    );
+
+    res.json({ data: items });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/v1/tasks/:id/comments - Get comments for a task
 router.get('/:id/comments', optionalAuth, validateUUID('id'), async (req, res, next) => {
   try {

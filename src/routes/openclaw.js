@@ -1035,6 +1035,28 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
               }
             }
 
+            // For cron sessions: find the latest individual run from sessions.usage
+            // so we show per-run token/cost data instead of the daily aggregate total.
+            // Mirrors the same logic used in the cron-jobs endpoint.
+            const cronLatestRunMap = new Map();
+            for (const us of usageResult.sessions) {
+              if (!us.key || !us.key.includes(':cron:')) continue;
+              const u = us.usage || {};
+              const runIdx = us.key.indexOf(':run:');
+              const parentKey = runIdx !== -1 ? us.key.slice(0, runIdx) : us.key;
+              const existing = cronLatestRunMap.get(parentKey);
+              if (!existing || (u.lastActivity || 0) > (existing.lastActivity || 0)) {
+                cronLatestRunMap.set(parentKey, u);
+              }
+            }
+            for (const s of sessions) {
+              if (!s.key || !s.key.includes(':cron:')) continue;
+              const runIdx = s.key.indexOf(':run:');
+              const parentKey = runIdx !== -1 ? s.key.slice(0, runIdx) : s.key;
+              const latestRun = cronLatestRunMap.get(parentKey);
+              if (latestRun) s._cronLatestRun = latestRun;
+            }
+
             // Enrich usage records with agent_key and model for session_usage persistence
             const enrichedUsage = usageResult.sessions.map((us) => {
               const meta = sessionMetaByKey.get(us.key);
@@ -1166,22 +1188,39 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
       const model = actualModel || null;
       
       // Extract token usage.
-      // Prefer enriched data from sessions.usage RPC (_usage* fields),
-      // fall back to session-level fields from sessions.list, then last message usage.
+      // Cron sessions: use the latest individual run's data (_cronLatestRun) so the
+      // display reflects "last run" rather than the daily aggregate across all runs.
+      // All other sessions: prefer enriched daily totals from sessions.usage (_usage* fields),
+      // fall back to session-level fields, then last message usage.
       const usage = lastMessage?.usage || {};
-      const inputTokens = session._usageInput || session.inputTokens || ((usage.input || 0) + (usage.cacheRead || 0));
-      const outputTokens = session._usageOutput || session.outputTokens || (usage.output || 0);
-      const cacheReadTokens = session._cacheRead || usage.cacheRead || 0;
-      const cacheWriteTokens = session._cacheWrite || usage.cacheWrite || 0;
-      const messageCost = session._totalCost || usage.cost?.total
-        || estimateCostFromTokens(model, inputTokens, outputTokens)
-        || 0;
-      
-      // Context window usage
-      const contextTokens = session.contextTokens || 0; // Total context window size
-      const totalTokensUsed = session.totalTokens || 0; // Tokens currently in context
-      const contextUsagePercent = contextTokens > 0 
-        ? Math.round((totalTokensUsed / contextTokens) * 100 * 10) / 10 
+      let inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens, messageCost;
+      if (session._cronLatestRun) {
+        const r = session._cronLatestRun;
+        inputTokens = r.input || 0;
+        outputTokens = r.output || 0;
+        cacheReadTokens = r.cacheRead || 0;
+        cacheWriteTokens = r.cacheWrite || 0;
+        messageCost = r.totalCost || estimateCostFromTokens(model, inputTokens, outputTokens) || 0;
+      } else {
+        inputTokens = session._usageInput || session.inputTokens || ((usage.input || 0) + (usage.cacheRead || 0));
+        outputTokens = session._usageOutput || session.outputTokens || (usage.output || 0);
+        cacheReadTokens = session._cacheRead || usage.cacheRead || 0;
+        cacheWriteTokens = session._cacheWrite || usage.cacheWrite || 0;
+        messageCost = session._totalCost || usage.cost?.total
+          || estimateCostFromTokens(model, inputTokens, outputTokens)
+          || 0;
+      }
+
+      // Context window usage.
+      // session.totalTokens from sessions.list is the cumulative lifetime token count,
+      // not the current context window fill — it can exceed contextTokens after compaction.
+      // For cron sessions use the latest run's totalTokens (context state at end of that run).
+      // For all sessions cap at contextTokens so the bar never exceeds 100%.
+      const contextTokens = session.contextTokens || 0;
+      const rawTotalTokens = session._cronLatestRun?.totalTokens ?? session.totalTokens ?? 0;
+      const totalTokensUsed = contextTokens > 0 ? Math.min(rawTotalTokens, contextTokens) : rawTotalTokens;
+      const contextUsagePercent = contextTokens > 0
+        ? Math.round((totalTokensUsed / contextTokens) * 100 * 10) / 10
         : 0;
       
       // Extract last message text content (truncated)
@@ -1391,7 +1430,7 @@ router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) 
       });
     }
     
-    const { sessionsHistory, sessionsHistoryViaWs, sessionsList } = require('../services/openclawGatewayClient');
+    const { sessionsHistory, sessionsHistoryViaWs, sessionsListAllViaWs } = require('../services/openclawGatewayClient');
     
     const parsedLimit = parseInt(limit, 10);
     let messages = [];
@@ -1468,29 +1507,23 @@ router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) 
       source: usedWsFallback ? 'tool' : 'websocket'
     });
     
-    // Also fetch session metadata to include in response
-    // We need to query the agent's session list to get the full session details
-    // Extract agent from sessionKey (e.g., "agent:coo:main" -> "coo")
-    let agentSessionKey = 'main';
-    if (sessionKey.startsWith('agent:')) {
-      const keyParts = sessionKey.split(':');
-      if (keyParts.length >= 2) {
-        const agentId = keyParts[1];
-        agentSessionKey = agentId === 'main' ? 'main' : `agent:${agentId}:main`;
-      }
+    // Fetch session metadata via WebSocket sessions.list RPC (gateway-level, not agent-scoped).
+    // This avoids the sessions_list tool invocation which fails when the agent session is
+    // busy or locked (returns 500 tool_error from /tools/invoke).
+    let session = null;
+    try {
+      const wsResult = await sessionsListAllViaWs({ includeGlobal: true, includeUnknown: true });
+      const allSessions = wsResult?.sessions || [];
+      session = allSessions.find(s =>
+        (s.sessionId === sessionId) || (s.id === sessionId) || (s.key === sessionKey)
+      );
+    } catch (metaErr) {
+      logger.warn('sessionsListAllViaWs failed for session metadata, using minimal metadata', {
+        sessionId,
+        sessionKey,
+        error: metaErr.message
+      });
     }
-    
-    // Query the agent's session list to get full session metadata
-    const sessions = await sessionsList({
-      sessionKey: agentSessionKey,
-      limit: 500,
-      messageLimit: 0 // We don't need messages here, just metadata
-    });
-    
-    // Find the session matching our sessionId
-    const session = sessions.find(s => 
-      (s.sessionId === sessionId) || (s.id === sessionId)
-    );
     
     // Transform messages for the dashboard
     // Messages are returned in chronological order (oldest first)
@@ -1523,12 +1556,17 @@ router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) 
       };
     });
     
-    // Build session metadata for context
+    // Build session metadata for context (fallback used when sessionsList fails)
+    let agentNameFromKey = 'unknown';
+    if (sessionKey && sessionKey.startsWith('agent:')) {
+      const parts = sessionKey.split(':');
+      if (parts.length >= 2) agentNameFromKey = parts[1];
+    }
     let sessionMetadata = {
       id: sessionId,
       key: sessionKey,
       label: sessionId,
-      agent: 'unknown',
+      agent: agentNameFromKey,
       status: 'unknown'
     };
     
@@ -1845,7 +1883,9 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
           || 0;
         const todayTotalCost = usageAgg?.totalCost ?? 0;
         const contextTokens = matchedSession?.contextTokens || 0;
-        const totalTokensUsed = latestRun?.totalTokens ?? matchedSession?.totalTokens ?? 0;
+        // latestRun.totalTokens is the context state at the end of that run; cap at contextTokens.
+        const rawTotalTokens = latestRun?.totalTokens ?? matchedSession?.totalTokens ?? 0;
+        const totalTokensUsed = contextTokens > 0 ? Math.min(rawTotalTokens, contextTokens) : rawTotalTokens;
         const contextUsagePercent = contextTokens > 0
           ? Math.round((totalTokensUsed / contextTokens) * 100 * 10) / 10
           : 0;
@@ -1866,6 +1906,7 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
             totalTokensUsed,
             contextUsagePercent,
             sessionKey: expectedKey,
+            sessionLabel: matchedSession?.displayName || matchedSession?.sessionLabel || null,
           },
         };
       }
