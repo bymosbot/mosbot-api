@@ -6,6 +6,7 @@ const runMigrations = require('./db/runMigrations');
 const logger = require('./utils/logger');
 const { startSessionUsagePoller } = require('./services/sessionUsageService');
 const { startPricingRefreshJob } = require('./services/modelPricingService');
+const { startActivityIngestionPollers } = require('./services/activityIngestionService');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -92,6 +93,8 @@ async function start() {
     10
   );
   startPricingRefreshJob(pricingRefreshIntervalMs);
+
+  startActivityIngestionPollers();
 }
 
 start();

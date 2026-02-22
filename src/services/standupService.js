@@ -1,5 +1,6 @@
 const pool = require('../db/pool');
 const logger = require('../utils/logger');
+const { recordActivityLogEventSafe } = require('./activityLogService');
 
 // Canonical standup order: COO > CTO > CPO > CMO
 const STANDUP_AGENT_ORDER = ['coo', 'cto', 'cpo', 'cmo'];
@@ -34,9 +35,9 @@ async function getAgentUsersForStandup() {
  * @returns {Promise<string|null>}
  */
 async function sendMessageToAgent(agentId, message, timeoutSeconds = 120) {
+  const sessionKey = `agent:${agentId}:main`;
   try {
     const { invokeTool } = require('./openclawGatewayClient');
-    const sessionKey = `agent:${agentId}:main`;
 
     const result = await invokeTool('sessions_send', {
       sessionKey,
@@ -48,20 +49,63 @@ async function sendMessageToAgent(agentId, message, timeoutSeconds = 120) {
 
     if (!result) {
       logger.warn('sessions_send returned null', { agentId });
+      recordActivityLogEventSafe({
+        event_type: 'adhoc_request',
+        source: 'standup',
+        title: `Standup message sent to ${agentId}`,
+        description: message.slice(0, 200),
+        severity: 'warning',
+        agent_id: agentId,
+        session_key: sessionKey,
+        meta: { outcome: 'null_result', timeoutSeconds },
+      });
       return null;
     }
 
     if (result.status === 'ok' && result.reply) {
+      recordActivityLogEventSafe({
+        event_type: 'adhoc_request',
+        source: 'standup',
+        title: `Standup message sent to ${agentId}`,
+        description: message.slice(0, 200),
+        severity: 'info',
+        agent_id: agentId,
+        session_key: sessionKey,
+        run_id: result.runId || null,
+        meta: { outcome: 'ok', reply_preview: result.reply.slice(0, 300), timeoutSeconds },
+      });
       return result.reply;
     }
 
     if (result.status === 'timeout') {
       logger.warn('Agent response timed out', { agentId, runId: result.runId });
+      recordActivityLogEventSafe({
+        event_type: 'adhoc_request',
+        source: 'standup',
+        title: `Standup message to ${agentId} timed out`,
+        description: message.slice(0, 200),
+        severity: 'warning',
+        agent_id: agentId,
+        session_key: sessionKey,
+        run_id: result.runId || null,
+        meta: { outcome: 'timeout', timeoutSeconds },
+      });
       return `[Timeout after ${timeoutSeconds}s — no response]`;
     }
 
     if (result.status === 'error') {
       logger.error('Agent response error', { agentId, error: result.error });
+      recordActivityLogEventSafe({
+        event_type: 'adhoc_request',
+        source: 'standup',
+        title: `Standup message to ${agentId} errored`,
+        description: message.slice(0, 200),
+        severity: 'error',
+        agent_id: agentId,
+        session_key: sessionKey,
+        run_id: result.runId || null,
+        meta: { outcome: 'error', error: result.error, timeoutSeconds },
+      });
       return `[Error: ${result.error}]`;
     }
 
@@ -72,6 +116,17 @@ async function sendMessageToAgent(agentId, message, timeoutSeconds = 120) {
       agentId,
       error: error.message,
       code: error.code,
+    });
+
+    recordActivityLogEventSafe({
+      event_type: 'adhoc_request',
+      source: 'standup',
+      title: `Standup message to ${agentId} failed`,
+      description: message.slice(0, 200),
+      severity: 'error',
+      agent_id: agentId,
+      session_key: sessionKey,
+      meta: { outcome: 'exception', error: error.message, code: error.code, timeoutSeconds },
     });
 
     if (error.status === 404 || error.code === 'TOOL_NOT_AVAILABLE') {

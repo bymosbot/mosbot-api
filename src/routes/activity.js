@@ -2,6 +2,58 @@ const express = require('express');
 const router = express.Router();
 const pool = require('../db/pool');
 
+const VALID_EVENT_TYPES = new Set([
+  'task_executed',
+  'cron_run',
+  'heartbeat_run',
+  'heartbeat_attention',
+  'adhoc_request',
+  'subagent_request',
+  'subagent_completed',
+  'workspace_file_created',
+  'workspace_file_updated',
+  'workspace_file_deleted',
+  'org_chart_agent_updated',
+  'org_chart_agent_created',
+  'cron_job_created',
+  'cron_job_updated',
+  'cron_job_deleted',
+  'cron_job_triggered',
+  'legacy',
+  'system',
+]);
+
+const VALID_SEVERITIES = new Set(['info', 'warning', 'attention', 'error']);
+
+const VALID_SOURCES = new Set([
+  'task', 'cron', 'heartbeat', 'subagent', 'workspace', 'org', 'standup', 'system',
+]);
+
+/**
+ * Build a `links` object for a row so the dashboard can render clickthrough pills.
+ * All fields are optional — only include what's available.
+ */
+function buildLinks(row) {
+  const links = {};
+  if (row.task_id) {
+    links.task = { href: `/task/${row.task_id}`, label: row.task_title || 'View Task' };
+  }
+  if (row.session_key) {
+    links.session = { href: `/monitor?sessionKey=${encodeURIComponent(row.session_key)}`, label: 'Agent Monitor' };
+  }
+  if (row.job_id) {
+    links.job = { href: `/scheduler?jobId=${encodeURIComponent(row.job_id)}`, label: 'Scheduler' };
+  }
+  if (row.workspace_path) {
+    if (row.workspace_path.startsWith('/shared/projects')) {
+      links.workspace = { href: `/projects`, label: 'Projects' };
+    } else {
+      links.workspace = { href: `/workspaces`, label: 'Workspace' };
+    }
+  }
+  return Object.keys(links).length ? links : undefined;
+}
+
 // Middleware to validate UUID
 const validateUUID = (paramName) => (req, res, next) => {
   const id = req.params[paramName];
@@ -13,15 +65,19 @@ const validateUUID = (paramName) => (req, res, next) => {
   next();
 };
 
-// GET /api/v1/activity/feed - Unified feed merging activity_logs + cron last-execution entries
+// GET /api/v1/activity/feed - Unified feed from activity_logs table only
 // Must be registered before /:id to avoid route collision.
 router.get('/feed', async (req, res, next) => {
   try {
     const {
+      event_type,
+      severity,
+      source,
       category,
       agent_id,
       task_id,
-      source = 'all',
+      job_id,
+      session_key,
       limit = 50,
       offset = 0,
       start_date,
@@ -31,169 +87,111 @@ router.get('/feed', async (req, res, next) => {
     const limitNum = Math.max(1, Math.min(parseInt(limit) || 50, 500));
     const offsetNum = Math.max(0, parseInt(offset) || 0);
 
-    let activityRows = [];
-    let cronRows = [];
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-    // --- Activity logs ---
-    if (source === 'all' || source === 'activity') {
-      let query = `
-        SELECT
-          al.id,
-          'activity' AS source,
-          al.timestamp,
-          al.title,
-          al.description,
-          al.category,
-          al.agent_id,
-          al.task_id,
-          t.title AS task_title,
-          u.name  AS agent_name,
-          u.avatar_url AS agent_avatar
-        FROM activity_logs al
-        LEFT JOIN tasks t ON t.id = al.task_id
-        LEFT JOIN users u ON u.agent_id = al.agent_id
-        WHERE 1=1
-      `;
-      const params = [];
-      let p = 1;
-
-      if (category) {
-        query += ` AND al.category = $${p++}`;
-        params.push(category);
-      }
-      if (agent_id) {
-        query += ` AND al.agent_id = $${p++}`;
-        params.push(agent_id);
-      }
-      if (task_id) {
-        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-        if (!uuidRegex.test(task_id)) {
-          return res.status(400).json({ error: { message: 'Invalid UUID format for task_id', status: 400 } });
-        }
-        query += ` AND al.task_id = $${p++}`;
-        params.push(task_id);
-      }
-      if (start_date) {
-        query += ` AND al.timestamp >= $${p++}`;
-        params.push(start_date);
-      }
-      if (end_date) {
-        query += ` AND al.timestamp <= $${p++}`;
-        params.push(end_date);
-      }
-
-      query += ` ORDER BY al.timestamp DESC`;
-      const result = await pool.query(query, params);
-      activityRows = result.rows;
+    if (task_id && !uuidRegex.test(task_id)) {
+      return res.status(400).json({ error: { message: 'Invalid UUID format for task_id', status: 400 } });
     }
 
-    // --- Cron execution entries ---
-    // session_usage stores individual run entries (agent:*:cron:*:run:*).
-    // Show all cron runs, not just the latest per job, so users can see the full history.
-    if (source === 'all' || source === 'cron') {
-      // Extract parent key: "agent:coo:cron:<jobId>:run:<runId>" -> "agent:coo:cron:<jobId>"
-      // Extract agent_key from session_key when column is null (older rows).
-      let cronQuery = `
-        WITH run_entries AS (
-          SELECT
-            su.*,
-            -- derive parent key by stripping ":run:<uuid>" suffix
-            CASE
-              WHEN su.session_key ~ ':run:[0-9a-f-]+$'
-              THEN regexp_replace(su.session_key, ':run:[0-9a-f-]+$', '')
-              ELSE su.session_key
-            END AS parent_key,
-            -- derive agent_key from session_key when column is null
-            COALESCE(
-              su.agent_key,
-              (regexp_match(su.session_key, '^agent:([^:]+):'))[1]
-            ) AS resolved_agent_key,
-            -- Round timestamp to nearest second to group runs that happened at the same time
-            date_trunc('second', su.first_seen_at) AS run_time_second
-          FROM session_usage su
-          WHERE su.session_key LIKE 'agent:%:cron:%'
-        ),
-        deduplicated_runs AS (
-          -- Deduplicate: if multiple session_keys exist for the same job at the same second,
-          -- take the one with the most recent last_updated_at (most complete/final state)
-          SELECT DISTINCT ON (re.parent_key, re.run_time_second)
-            re.session_key,
-            re.first_seen_at,
-            re.last_updated_at,
-            re.label,
-            re.parent_key,
-            re.resolved_agent_key,
-            re.model,
-            re.tokens_input,
-            re.tokens_output,
-            re.cost_usd
-          FROM run_entries re
-          ORDER BY re.parent_key, re.run_time_second, re.last_updated_at DESC
-        )
-        SELECT
-          dr.session_key                                    AS id,
-          'cron'                                           AS source,
-          dr.first_seen_at                                 AS timestamp,
-          COALESCE(dr.label, dr.parent_key)               AS title,
-          NULL::text                                       AS description,
-          NULL::text                                       AS category,
-          dr.resolved_agent_key                            AS agent_id,
-          NULL::uuid                                       AS task_id,
-          NULL::text                                       AS task_title,
-          u.name                                           AS agent_name,
-          dr.parent_key                                    AS job_id,
-          COALESCE(dr.label, dr.parent_key)               AS job_name,
-          dr.model,
-          dr.tokens_input,
-          dr.tokens_output,
-          dr.cost_usd
-        FROM deduplicated_runs dr
-        LEFT JOIN users u ON u.agent_id = dr.resolved_agent_key
-        WHERE 1=1
-      `;
-      const cronParams = [];
-      let cp = 1;
+    const params = [];
+    let p = 1;
 
-      if (agent_id) {
-        // filter inside the CTE result — resolved_agent_key is exposed as agent_id alias
-        cronQuery += ` AND dr.resolved_agent_key = $${cp++}`;
-        cronParams.push(agent_id);
-      }
-      if (start_date) {
-        cronQuery += ` AND dr.first_seen_at >= $${cp++}`;
-        cronParams.push(start_date);
-      }
-      if (end_date) {
-        cronQuery += ` AND dr.first_seen_at <= $${cp++}`;
-        cronParams.push(end_date);
-      }
+    let query = `
+      SELECT
+        al.id,
+        al.timestamp,
+        al.title,
+        al.description,
+        al.category,
+        al.event_type,
+        al.severity,
+        al.source,
+        al.agent_id,
+        al.task_id,
+        al.job_id,
+        al.session_key,
+        al.run_id,
+        al.workspace_path,
+        al.meta,
+        al.actor_user_id,
+        al.created_at,
+        t.title       AS task_title,
+        u.name        AS agent_name,
+        u.avatar_url  AS agent_avatar,
+        au.name       AS actor_name
+      FROM activity_logs al
+      LEFT JOIN tasks t  ON t.id = al.task_id
+      LEFT JOIN users u  ON u.agent_id = al.agent_id
+      LEFT JOIN users au ON au.id = al.actor_user_id
+      WHERE 1=1
+    `;
 
-      // Order by timestamp DESC to show most recent runs first
-      cronQuery += ` ORDER BY dr.first_seen_at DESC`;
-
-      try {
-        const cronResult = await pool.query(cronQuery, cronParams);
-        cronRows = cronResult.rows;
-      } catch (_cronErr) {
-        // session_usage table may not exist in all environments — degrade gracefully
-        cronRows = [];
-      }
+    if (event_type) {
+      query += ` AND al.event_type = $${p++}`;
+      params.push(event_type);
+    }
+    if (severity) {
+      query += ` AND al.severity = $${p++}`;
+      params.push(severity);
+    }
+    if (source) {
+      query += ` AND al.source = $${p++}`;
+      params.push(source);
+    }
+    if (category) {
+      query += ` AND al.category = $${p++}`;
+      params.push(category);
+    }
+    if (agent_id) {
+      query += ` AND al.agent_id = $${p++}`;
+      params.push(agent_id);
+    }
+    if (task_id) {
+      query += ` AND al.task_id = $${p++}`;
+      params.push(task_id);
+    }
+    if (job_id) {
+      query += ` AND al.job_id = $${p++}`;
+      params.push(job_id);
+    }
+    if (session_key) {
+      query += ` AND al.session_key = $${p++}`;
+      params.push(session_key);
+    }
+    if (start_date) {
+      query += ` AND al.timestamp >= $${p++}`;
+      params.push(start_date);
+    }
+    if (end_date) {
+      query += ` AND al.timestamp <= $${p++}`;
+      params.push(end_date);
     }
 
-    // Merge, sort by timestamp DESC, paginate
-    const merged = [...activityRows, ...cronRows].sort(
-      (a, b) => new Date(b.timestamp) - new Date(a.timestamp)
+    const countQuery = query.replace(
+      /SELECT[\s\S]+?FROM activity_logs/,
+      'SELECT COUNT(*) AS total FROM activity_logs'
     );
 
-    const total = merged.length;
-    const page = merged.slice(offsetNum, offsetNum + limitNum);
+    query += ` ORDER BY al.timestamp DESC LIMIT $${p++} OFFSET $${p++}`;
+    params.push(limitNum, offsetNum);
+
+    const countParams = params.slice(0, params.length - 2);
+    const [result, countResult] = await Promise.all([
+      pool.query(query, params),
+      pool.query(countQuery, countParams),
+    ]);
+
+    const data = result.rows.map((row) => ({
+      ...row,
+      links: buildLinks(row),
+    }));
 
     res.json({
-      data: page,
+      data,
       pagination: {
         limit: limitNum,
         offset: offsetNum,
-        total,
+        total: parseInt(countResult.rows[0].total, 10),
       },
     });
   } catch (error) {
@@ -315,7 +313,24 @@ router.get('/:id', validateUUID('id'), async (req, res, next) => {
 // POST /api/v1/activity - Create a new activity log
 router.post('/', async (req, res, next) => {
   try {
-    const { title, description, category, agent_id, task_id, timestamp } = req.body;
+    const {
+      title,
+      description,
+      category,
+      agent_id,
+      task_id,
+      timestamp,
+      event_type,
+      severity,
+      source,
+      actor_user_id,
+      job_id,
+      session_key,
+      run_id,
+      workspace_path,
+      meta,
+      dedupe_key,
+    } = req.body;
     
     if (!title || title.trim().length === 0) {
       return res.status(400).json({ error: { message: 'Title is required', status: 400 } });
@@ -328,12 +343,50 @@ router.post('/', async (req, res, next) => {
     if (title.length > 500) {
       return res.status(400).json({ error: { message: 'Title must be 500 characters or less', status: 400 } });
     }
+
+    if (event_type && !VALID_EVENT_TYPES.has(event_type)) {
+      return res.status(400).json({ error: { message: `Invalid event_type: ${event_type}`, status: 400 } });
+    }
+
+    if (severity && !VALID_SEVERITIES.has(severity)) {
+      return res.status(400).json({ error: { message: `Invalid severity: ${severity}`, status: 400 } });
+    }
+
+    if (source && !VALID_SOURCES.has(source)) {
+      return res.status(400).json({ error: { message: `Invalid source: ${source}`, status: 400 } });
+    }
     
     const result = await pool.query(`
-      INSERT INTO activity_logs (title, description, category, agent_id, task_id, timestamp)
-      VALUES ($1, $2, $3, $4, $5, $6)
+      INSERT INTO activity_logs (
+        title, description, category, agent_id, task_id, timestamp,
+        event_type, severity, source, actor_user_id,
+        job_id, session_key, run_id, workspace_path, meta, dedupe_key
+      )
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+      ON CONFLICT (dedupe_key) WHERE dedupe_key IS NOT NULL DO NOTHING
       RETURNING *
-    `, [title, description, category, agent_id || null, task_id || null, timestamp || new Date()]);
+    `, [
+      title,
+      description,
+      category || null,
+      agent_id || null,
+      task_id || null,
+      timestamp || new Date(),
+      event_type || 'system',
+      severity || 'info',
+      source || 'system',
+      actor_user_id || null,
+      job_id || null,
+      session_key || null,
+      run_id || null,
+      workspace_path || null,
+      meta ? JSON.stringify(meta) : null,
+      dedupe_key || null,
+    ]);
+
+    if (result.rows.length === 0) {
+      return res.status(200).json({ data: null, deduplicated: true });
+    }
     
     res.status(201).json({ data: result.rows[0] });
   } catch (error) {

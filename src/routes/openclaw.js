@@ -6,6 +6,7 @@ const path = require('path');
 const { requireAdmin } = require('./auth');
 const { makeOpenClawRequest } = require('../services/openclawWorkspaceClient');
 const { estimateCostFromTokens } = require('../services/modelPricingService');
+const { recordActivityLogEventSafe } = require('../services/activityLogService');
 
 // Auth middleware - require valid JWT
 const requireAuth = (req, res, next) => {
@@ -221,6 +222,17 @@ router.post('/workspace/files', requireAuth, requireAdmin, async (req, res, next
       content,
       encoding
     });
+
+    recordActivityLogEventSafe({
+      event_type: 'workspace_file_created',
+      source: 'workspace',
+      title: `File created: ${workspacePath}`,
+      description: `User created workspace file at ${workspacePath}`,
+      severity: 'info',
+      actor_user_id: req.user.id,
+      workspace_path: workspacePath,
+      meta: { contentLength: content.length, encoding },
+    });
     
     res.status(201).json({ data });
   } catch (error) {
@@ -273,6 +285,17 @@ router.put('/workspace/files', requireAuth, requireAdmin, async (req, res, next)
       content,
       encoding
     });
+
+    recordActivityLogEventSafe({
+      event_type: 'workspace_file_updated',
+      source: 'workspace',
+      title: `File updated: ${workspacePath}`,
+      description: `User updated workspace file at ${workspacePath}`,
+      severity: 'info',
+      actor_user_id: req.user.id,
+      workspace_path: workspacePath,
+      meta: { contentLength: content.length, encoding },
+    });
     
     res.json({ data });
   } catch (error) {
@@ -320,6 +343,16 @@ router.delete('/workspace/files', requireAuth, requireAdmin, async (req, res, ne
     });
     
     await makeOpenClawRequest('DELETE', `/files?path=${encodeURIComponent(workspacePath)}`);
+
+    recordActivityLogEventSafe({
+      event_type: 'workspace_file_deleted',
+      source: 'workspace',
+      title: `File deleted: ${workspacePath}`,
+      description: `User deleted workspace file at ${workspacePath}`,
+      severity: 'warning',
+      actor_user_id: req.user.id,
+      workspace_path: workspacePath,
+    });
     
     res.status(204).send();
   } catch (error) {
@@ -788,6 +821,17 @@ router.put('/org-chart/agents/:agentId', requireAuth, requireAdmin, async (req, 
       openclawSize: openclawContent.length,
     });
 
+    recordActivityLogEventSafe({
+      event_type: 'org_chart_agent_updated',
+      source: 'org',
+      title: `Agent updated: ${agentId}`,
+      description: `Org chart and OpenClaw config updated for agent "${agentId}"`,
+      severity: 'info',
+      actor_user_id: req.user.id,
+      agent_id: agentId,
+      meta: { agentData },
+    });
+
     res.json({
       data: {
         agentId,
@@ -906,6 +950,17 @@ router.post('/org-chart/agents', requireAuth, requireAdmin, async (req, res, nex
       agentId: agentData.id,
       orgChartSize: orgChartContent.length,
       openclawSize: openclawContent.length,
+    });
+
+    recordActivityLogEventSafe({
+      event_type: 'org_chart_agent_created',
+      source: 'org',
+      title: `Agent created: ${agentData.id}`,
+      description: `New agent "${agentData.displayName}" (${agentData.id}) added to org chart`,
+      severity: 'info',
+      actor_user_id: req.user.id,
+      agent_id: agentData.id,
+      meta: { displayName: agentData.displayName, title: agentData.title, status: agentData.status },
     });
 
     res.status(201).json({
@@ -2294,6 +2349,17 @@ router.post('/cron-jobs', requireAuth, requireAdmin, async (req, res, next) => {
 
     const job = await createCronJob(bodyWithoutSystemFields);
 
+    recordActivityLogEventSafe({
+      event_type: 'cron_job_created',
+      source: 'cron',
+      title: `Cron job created: ${job.name || job.jobId}`,
+      description: `New cron job "${job.name}" created with schedule "${job.schedule}"`,
+      severity: 'info',
+      actor_user_id: req.user.id,
+      job_id: job.jobId,
+      meta: { name: job.name, schedule: job.schedule, agentId: job.agentId },
+    });
+
     res.status(201).json({ data: job });
   } catch (error) {
     next(error);
@@ -2324,6 +2390,17 @@ router.patch('/cron-jobs/:jobId', requireAuth, requireAdmin, async (req, res, ne
     } else {
       job = await updateCronJob(jobId, req.body);
     }
+
+    recordActivityLogEventSafe({
+      event_type: 'cron_job_updated',
+      source: 'cron',
+      title: `Cron job updated: ${jobId}`,
+      description: `Cron job "${jobId}" configuration updated`,
+      severity: 'info',
+      actor_user_id: req.user.id,
+      job_id: jobId,
+      meta: { changes: req.body, isHeartbeat },
+    });
     
     res.json({ data: job });
   } catch (error) {
@@ -2391,6 +2468,17 @@ router.patch('/cron-jobs/:jobId/enabled', requireAuth, requireAdmin, async (req,
     });
     
     const job = await setCronJobEnabled(jobId, enabled);
+
+    recordActivityLogEventSafe({
+      event_type: 'cron_job_updated',
+      source: 'cron',
+      title: `Cron job ${enabled ? 'enabled' : 'disabled'}: ${jobId}`,
+      description: `Cron job "${jobId}" was ${enabled ? 'enabled' : 'disabled'}`,
+      severity: 'info',
+      actor_user_id: req.user.id,
+      job_id: jobId,
+      meta: { enabled },
+    });
     
     res.json({ data: job });
   } catch (error) {
@@ -2411,6 +2499,18 @@ router.post('/cron-jobs/:jobId/run', requireAuth, requireAdmin, async (req, res,
     });
 
     const job = await triggerCronJob(jobId);
+
+    recordActivityLogEventSafe({
+      event_type: 'cron_job_triggered',
+      source: 'cron',
+      title: `Cron job manually triggered: ${jobId}`,
+      description: `Cron job "${jobId}" was manually triggered by user`,
+      severity: 'info',
+      actor_user_id: req.user.id,
+      job_id: jobId,
+      session_key: job.state?.lastSessionId || null,
+      meta: { sessionId: job.state?.lastSessionId || null },
+    });
 
     res.json({
       data: {
@@ -2436,6 +2536,18 @@ router.post('/cron-jobs/:jobId/trigger', requireAuth, requireAdmin, async (req, 
     });
 
     const job = await triggerCronJob(jobId);
+
+    recordActivityLogEventSafe({
+      event_type: 'cron_job_triggered',
+      source: 'cron',
+      title: `Cron job manually triggered: ${jobId}`,
+      description: `Cron job "${jobId}" was manually triggered by user`,
+      severity: 'info',
+      actor_user_id: req.user.id,
+      job_id: jobId,
+      session_key: job.state?.lastSessionId || null,
+      meta: { sessionId: job.state?.lastSessionId || null },
+    });
 
     res.json({
       data: {
@@ -2472,6 +2584,16 @@ router.delete('/cron-jobs/:jobId', requireAuth, requireAdmin, async (req, res, n
     });
     
     await deleteCronJob(jobId);
+
+    recordActivityLogEventSafe({
+      event_type: 'cron_job_deleted',
+      source: 'cron',
+      title: `Cron job deleted: ${jobId}`,
+      description: `Cron job "${jobId}" was permanently deleted`,
+      severity: 'warning',
+      actor_user_id: req.user.id,
+      job_id: jobId,
+    });
 
     res.json({ data: { success: true } });
   } catch (error) {

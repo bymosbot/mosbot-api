@@ -212,9 +212,22 @@ CREATE TABLE IF NOT EXISTS activity_logs (
     timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     title VARCHAR(500) NOT NULL,
     description TEXT NOT NULL,
+    -- Legacy free-form category (kept for backward compat; new code uses event_type)
     category VARCHAR(100),
     task_id UUID REFERENCES tasks (id) ON DELETE SET NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    -- v2 unified event taxonomy
+    event_type TEXT NOT NULL DEFAULT 'system',
+    severity TEXT NOT NULL DEFAULT 'info',
+    source TEXT NOT NULL DEFAULT 'system',
+    actor_user_id UUID REFERENCES users (id) ON DELETE SET NULL,
+    agent_id VARCHAR(100),
+    job_id TEXT,
+    session_key TEXT,
+    run_id TEXT,
+    workspace_path TEXT,
+    meta JSONB,
+    dedupe_key TEXT
 );
 
 -- Task logs table (per-task history/audit trail)
@@ -313,6 +326,15 @@ CREATE INDEX IF NOT EXISTS idx_tasks_tags ON tasks USING GIN (tags);
 CREATE INDEX IF NOT EXISTS idx_activity_timestamp ON activity_logs (timestamp DESC);
 
 CREATE INDEX IF NOT EXISTS idx_activity_task_id ON activity_logs (task_id);
+
+CREATE INDEX IF NOT EXISTS idx_activity_event_type_ts  ON activity_logs (event_type, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_source_ts       ON activity_logs (source, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_severity_ts     ON activity_logs (severity, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_activity_agent_id_ts     ON activity_logs (agent_id, timestamp DESC) WHERE agent_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_activity_job_id          ON activity_logs (job_id) WHERE job_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_activity_session_key     ON activity_logs (session_key) WHERE session_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_activity_actor_user_id   ON activity_logs (actor_user_id) WHERE actor_user_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_dedupe_key ON activity_logs (dedupe_key) WHERE dedupe_key IS NOT NULL;
 
 CREATE INDEX IF NOT EXISTS idx_task_logs_task_occurred ON task_logs (task_id, occurred_at DESC);
 
