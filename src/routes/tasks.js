@@ -98,14 +98,14 @@ function computeTaskDiff(oldTask, newTask) {
 // GET /api/v1/tasks - List all tasks with optional filtering
 router.get('/', optionalAuth, async (req, res, next) => {
   try {
-    const { status, assignee_id, reporter_id, priority, include_archived, limit = 100, offset = 0 } = req.query;
-    
+    const { status, assignee_id, reporter_id, priority, include_archived, done_after, done_within_hours, limit = 100, offset = 0 } = req.query;
+
     // Validate pagination parameters
     const limitNum = Math.max(1, Math.min(parseInt(limit) || 100, 1000));
     const offsetNum = Math.max(0, parseInt(offset) || 0);
-    
+
     let query = `
-      SELECT 
+      SELECT
         t.*,
         u_reporter.name as reporter_name,
         u_reporter.email as reporter_email,
@@ -119,10 +119,10 @@ router.get('/', optionalAuth, async (req, res, next) => {
       LEFT JOIN tasks parent_task ON t.parent_task_id = parent_task.id
       WHERE 1=1
     `;
-    
+
     const params = [];
     let paramCount = 1;
-    
+
     if (status) {
       query += ` AND t.status = $${paramCount}`;
       params.push(status);
@@ -131,30 +131,48 @@ router.get('/', optionalAuth, async (req, res, next) => {
       // Exclude archived tasks by default unless explicitly requested
       query += ' AND t.status != \'ARCHIVE\'';
     }
-    
+
     if (assignee_id) {
       query += ` AND t.assignee_id = $${paramCount}`;
       params.push(assignee_id);
       paramCount++;
     }
-    
+
     if (reporter_id) {
       query += ` AND t.reporter_id = $${paramCount}`;
       params.push(reporter_id);
       paramCount++;
     }
-    
+
     if (priority) {
       query += ` AND t.priority = $${paramCount}`;
       params.push(priority);
       paramCount++;
     }
-    
+
+    // Filter for tasks completed after a specific timestamp (ISO 8601)
+    if (done_after) {
+      const parsedDate = new Date(done_after);
+      if (!isNaN(parsedDate.getTime())) {
+        query += ` AND t.done_at >= $${paramCount}`;
+        params.push(parsedDate.toISOString());
+        paramCount++;
+      }
+    }
+
+    // Filter for tasks completed within the last N hours (convenience parameter)
+    if (done_within_hours) {
+      const hours = parseInt(done_within_hours);
+      if (!isNaN(hours) && hours > 0) {
+        query += ` AND t.done_at >= NOW() - INTERVAL '${hours} hours'`;
+      }
+    }
+
     query += ` ORDER BY t.created_at DESC LIMIT $${paramCount} OFFSET $${paramCount + 1}`;
     params.push(limitNum, offsetNum);
-    
+
     const result = await pool.query(query, params);
-    
+
     res.json({
       data: result.rows,
       pagination: {

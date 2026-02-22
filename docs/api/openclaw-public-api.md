@@ -438,6 +438,8 @@ Query parameters:
 - `assignee_id` (optional uuid)
 - `reporter_id` (optional uuid)
 - `priority` (optional): `High` | `Medium` | `Low`
+- `done_after` (optional, ISO 8601 timestamp): Filter tasks completed after this time (e.g., `2026-02-21T00:00:00Z`)
+- `done_within_hours` (optional, integer): Filter tasks completed within the last N hours (e.g., `24` for last 24 hours)
 - `limit` (optional, default `100`, max `1000`)
 - `offset` (optional, default `0`)
 
