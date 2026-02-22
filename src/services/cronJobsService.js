@@ -138,6 +138,9 @@ function toOfficialFormat(clientPayload) {
         kind: 'systemEvent',
         text: srcPayload.text || srcPayload.message || srcPayload.prompt || '',
       };
+      if (srcPayload.model) {
+        official.payload.model = srcPayload.model;
+      }
     }
   }
 

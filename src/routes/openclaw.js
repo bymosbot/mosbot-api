@@ -1,8 +1,10 @@
 const express = require('express');
 const router = express.Router();
 const jwt = require('jsonwebtoken');
+const bcrypt = require('bcrypt');
 const logger = require('../utils/logger');
 const path = require('path');
+const pool = require('../db/pool');
 const { requireAdmin } = require('./auth');
 const { makeOpenClawRequest } = require('../services/openclawWorkspaceClient');
 const { estimateCostFromTokens } = require('../services/modelPricingService');
@@ -1561,6 +1563,57 @@ router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) 
       usedWsFallback = true;
     }
 
+    // For isolated cron sessions the gateway stores messages under per-run sub-keys
+    // (agent:{id}:cron:{jobId}:run:{runId}) rather than the parent key.
+    // If chat.history on the parent key returned nothing, look up the latest :run:
+    // sub-session via sessions.list and retry with that key.
+    const isCronParentKey = sessionKey && sessionKey.includes(':cron:') && !sessionKey.includes(':run:');
+    if (!usedWsFallback && messages.length === 0 && isCronParentKey) {
+      try {
+        const listResult = await sessionsListAllViaWs({ includeGlobal: true, includeUnknown: true });
+        const allSessions = listResult?.sessions || [];
+        // Find all :run: sub-sessions for this parent key, then pick the most recent
+        const runSessions = allSessions.filter(s => s.key && s.key.startsWith(sessionKey + ':run:'));
+        if (runSessions.length > 0) {
+          // Sort by updatedAt descending to get the latest run
+          runSessions.sort((a, b) => {
+            const ta = toUpdatedAtMs(a.updatedAt ?? a.updated_at) || 0;
+            const tb = toUpdatedAtMs(b.updatedAt ?? b.updated_at) || 0;
+            return tb - ta;
+          });
+          const latestRunKey = runSessions[0].key;
+          logger.info('Retrying chat.history with latest cron run key', {
+            parentKey: sessionKey,
+            latestRunKey,
+            runCount: runSessions.length,
+          });
+          try {
+            const runResult = await sessionsHistoryViaWs({ sessionKey: latestRunKey, limit: parsedLimit || 200 });
+            const runMessages = Array.isArray(runResult?.messages) ? runResult.messages : [];
+            if (runMessages.length > 0) {
+              messages = runMessages;
+              logger.info('Session history fetched via latest run key', {
+                latestRunKey,
+                messageCount: messages.length,
+              });
+            }
+          } catch (runErr) {
+            logger.warn('chat.history on latest run key also failed', {
+              latestRunKey,
+              error: runErr.message,
+            });
+          }
+        } else {
+          logger.info('No :run: sub-sessions found for cron parent key', { sessionKey });
+        }
+      } catch (listErr) {
+        logger.warn('sessions.list lookup for cron run key failed', {
+          sessionKey,
+          error: listErr.message,
+        });
+      }
+    }
+
     // Fallback: use sessions_history tool via /tools/invoke
     if (usedWsFallback) {
       const historyResult = await sessionsHistory({
@@ -1732,10 +1785,16 @@ router.get('/sessions/:sessionId/messages', requireAuth, async (req, res, next) 
       messageCount: transformedMessages.length
     });
     
+    // If there are no messages and the session wasn't found in sessions.list, the
+    // agent's session simply isn't loaded in the gateway (e.g. agent hasn't been
+    // active recently). Signal this to the dashboard so it can show a better message.
+    const sessionNotLoaded = transformedMessages.length === 0 && !session;
+
     res.json({
       data: {
         messages: transformedMessages,
-        session: sessionMetadata
+        session: sessionMetadata,
+        sessionNotLoaded,
       }
     });
   } catch (error) {
@@ -2030,17 +2089,45 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
       // Gateway-only guard for non-heartbeat jobs
       if (!isHeartbeatJob && job.source !== 'gateway') return job;
 
+      // Resolve the session target for this job.
+      // systemEvent jobs with sessionTarget=main run inside the agent's main session;
+      // agentTurn jobs always use isolated per-run sessions.
+      const resolvedSessionTarget = job.sessionTarget || job.payload?.session
+        || (job.payload?.kind === 'agentTurn' ? 'isolated' : 'main');
+
       let expectedKey;
+      // messageSessionKey is the key where messages actually live (may differ from expectedKey
+      // for main-session jobs where the cron key has no messages).
+      let messageSessionKey;
       if (isHeartbeatJob) {
         // Try both heartbeat key variants; prefer isolated (v2026.2.19+) if present
         const isolatedKey = `agent:${job.agentId}:isolated`;
         const heartbeatKey = `agent:${job.agentId}:heartbeat`;
         expectedKey = cronSessionMap.has(isolatedKey) ? isolatedKey : heartbeatKey;
+        messageSessionKey = expectedKey;
       } else {
         expectedKey = `agent:${job.agentId}:cron:${jobId}`;
+        // systemEvent jobs targeting main run inside agent:{id}:main — messages live there
+        messageSessionKey = resolvedSessionTarget === 'main'
+          ? `agent:${job.agentId}:main`
+          : expectedKey;
       }
 
-      const matchedSession = cronSessionMap.get(expectedKey);
+      let matchedSession = cronSessionMap.get(expectedKey);
+      // If no parent session exists, fall back to the most recently updated :run: sub-session
+      // (isolated cron runs may only create per-run keys, not a persistent parent session).
+      if (!matchedSession && !isHeartbeatJob) {
+        const runPrefix = expectedKey + ':run:';
+        let latestRunTs = 0;
+        for (const [key, s] of cronSessionMap) {
+          if (!key.startsWith(runPrefix)) continue;
+          const ts = toUpdatedAtMs(s.updatedAt ?? s.updated_at) || 0;
+          if (ts > latestRunTs) {
+            latestRunTs = ts;
+            matchedSession = s;
+          }
+        }
+      }
       const usageAgg = cronUsageByParent.get(expectedKey);
       const latestRun = usageAgg?.latestRun;
       const jobLastRunMs = job.state?.lastRunAtMs;
@@ -2082,7 +2169,7 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
             contextTokens,
             totalTokensUsed,
             contextUsagePercent,
-            sessionKey: expectedKey,
+            sessionKey: messageSessionKey,
             sessionLabel: matchedSession?.displayName || matchedSession?.sessionLabel || null,
           },
         };
@@ -2105,7 +2192,7 @@ router.get('/cron-jobs', requireAuth, async (req, res, next) => {
           contextTokens: null,
           totalTokensUsed: null,
           contextUsagePercent: null,
-          sessionKey: expectedKey,
+          sessionKey: messageSessionKey,
           durationMs: job.state?.lastDurationMs || null,
           status: job.state?.lastStatus || null,
           unavailable: true,
@@ -2610,8 +2697,6 @@ router.delete('/cron-jobs/:jobId', requireAuth, requireAdmin, async (req, res, n
 //              When range="today", calculates the start of "today" in the specified timezone.
 router.get('/usage', requireAuth, async (req, res, next) => {
   try {
-    const pool = require('../db/pool');
-
     const VALID_RANGES = ['today', '24h', '3d', '7d', '14d', '30d', '3m', '6m'];
     const range = VALID_RANGES.includes(req.query.range) ? req.query.range : '7d';
     const timezone = req.query.timezone || 'UTC';
@@ -2829,6 +2914,65 @@ router.get('/usage', requireAuth, async (req, res, next) => {
           runCount:         parseInt(r.run_count, 10),
         })),
       },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/v1/openclaw/usage/reset - Reset all usage data (admin only, requires password confirmation)
+router.post('/usage/reset', requireAuth, requireAdmin, async (req, res, next) => {
+  try {
+    const { password } = req.body;
+    const userId = req.user.id;
+
+    // Validate password is provided
+    if (!password || password.length === 0) {
+      return res.status(400).json({
+        error: { message: 'Password is required to confirm reset', status: 400 }
+      });
+    }
+
+    // Verify user's password
+    const userResult = await pool.query(
+      'SELECT password_hash FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({
+        error: { message: 'User not found', status: 401 }
+      });
+    }
+
+    const isValidPassword = await bcrypt.compare(password, userResult.rows[0].password_hash);
+
+    if (!isValidPassword) {
+      return res.status(401).json({
+        error: { message: 'Invalid password', status: 401 }
+      });
+    }
+
+    // Count records before deletion for response
+    const hourlyCountResult = await pool.query('SELECT COUNT(*) AS total FROM session_usage_hourly');
+    const usageCountResult = await pool.query('SELECT COUNT(*) AS total FROM session_usage');
+    const deletedHourly = parseInt(hourlyCountResult.rows[0].total, 10);
+    const deletedUsage = parseInt(usageCountResult.rows[0].total, 10);
+
+    // Delete all usage data
+    await pool.query('DELETE FROM session_usage_hourly');
+    await pool.query('DELETE FROM session_usage');
+
+    res.json({
+      data: {
+        success: true,
+        deletedCount: {
+          sessionUsage: deletedUsage,
+          hourlyUsage: deletedHourly,
+          total: deletedUsage + deletedHourly
+        },
+        message: `All usage data has been permanently deleted (${deletedUsage} session usage records, ${deletedHourly} hourly records)`
+      }
     });
   } catch (error) {
     next(error);
