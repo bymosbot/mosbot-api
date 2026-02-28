@@ -1,6 +1,6 @@
 {
   "name": "mosbot-api",
-  "version": "1.0.0",
+  "version": "0.1.1",
   "description": "MosBot task management API - self-hosted backend",
   "main": "src/index.js",
   "scripts": {
