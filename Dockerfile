@@ -15,14 +15,14 @@ WORKDIR /app
 FROM base AS dependencies
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --omit=dev && \
+RUN npm ci --omit=dev --ignore-scripts && \
     npm cache clean --force
 
 # Development dependencies stage (for future test/build stages)
 FROM base AS dev-dependencies
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci && \
+RUN npm ci --ignore-scripts && \
     npm cache clean --force
 
 # Development stage (for local development with hot reload)
