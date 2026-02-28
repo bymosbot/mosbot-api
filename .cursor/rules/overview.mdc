@@ -1,0 +1,13 @@
+---
+description: How to apply MosBot API Cursor rules
+alwaysApply: true
+---
+
+# MosBot API — Rules Overview
+
+| File | Covers |
+| ---- | ------ |
+| `contributing.mdc` | Code style, quality gates, PR checklist |
+| `security.mdc` | Secrets, JWT, env vars, accidental-commit procedure |
+| `architecture.mdc` | Routing, DB, migrations, backwards compat, docs |
+| `openclaw-integration.mdc` | OpenClaw workspace endpoints and path security |

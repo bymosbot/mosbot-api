@@ -1,0 +1,17 @@
+# Secret scanning with gitleaks
+if command -v gitleaks &> /dev/null; then
+  gitleaks protect --staged --redact --no-banner
+  if [ $? -ne 0 ]; then
+    echo ""
+    echo "gitleaks: potential secrets detected in staged files. Commit blocked."
+    echo "Review the findings above, remove any secrets, and try again."
+    echo "To bypass in an emergency: git commit --no-verify (use with extreme caution)"
+    exit 1
+  fi
+else
+  echo "WARNING: gitleaks is not installed — secret scanning skipped."
+  echo "Install it: brew install gitleaks"
+fi
+
+# Lint and format staged files
+npx lint-staged

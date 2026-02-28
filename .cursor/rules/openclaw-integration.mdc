@@ -1,0 +1,66 @@
+---
+description: OpenClaw workspace integration patterns and conventions
+alwaysApply: false
+---
+
+# OpenClaw Integration
+
+Apply when working with `src/routes/openclaw.js` or OpenClaw service clients.
+
+## Request flow
+
+```text
+User → MosBot API (JWT auth) → Workspace Service (optional bearer token)
+```
+
+MosBot API acts as the authenticated gateway — it never exposes the workspace service directly.
+
+## Endpoint conventions
+
+- Base path: `/api/v1/openclaw/workspace/*`
+- Requires JWT authentication (same as all other protected endpoints)
+- Standard response envelope: `{ data: ... }`
+
+### Endpoints
+
+- `GET /workspace/files` — list files (`path`, `recursive` query params)
+- `GET /workspace/files/content` — read file (`path` required)
+- `POST /workspace/files` — create file (`path`, `content` in body)
+- `PUT /workspace/files` — update file (`path`, `content` in body)
+- `DELETE /workspace/files` — delete file (`path` query param)
+- `GET /workspace/status` — workspace health
+
+## Security
+
+- Validate and normalize all paths before forwarding — block `..` sequences.
+- Paths must stay within the `/workspace` boundary.
+- Log all workspace operations with user attribution.
+
+```javascript
+function validateWorkspacePath(requestedPath) {
+  const normalized = path.normalize(requestedPath);
+  if (normalized.includes('..')) throw new Error('Path traversal not allowed');
+  return normalized.startsWith('/') ? normalized : '/' + normalized;
+}
+```
+
+## Configuration
+
+| Env var | Required | Purpose |
+| ------- | -------- | ------- |
+| `OPENCLAW_WORKSPACE_URL` | Yes | URL of the workspace service |
+| `OPENCLAW_WORKSPACE_TOKEN` | No | Bearer token for service-to-service auth |
+
+- OpenClaw features degrade gracefully when `OPENCLAW_WORKSPACE_URL` is unset.
+- Never hardcode the service URL — always read from `process.env`.
+
+## Error handling
+
+- Use standard error shape: `{ error: { message, status } }`
+- Handle connection failures gracefully — return `503` with a clear message.
+- Return `404` for missing files, `500` for unexpected service errors.
+
+## Related documentation
+
+- `docs/api/openclaw-public-api.md` — public API contract
+- `docs/openclaw/workspace/` — canonical workspace docs

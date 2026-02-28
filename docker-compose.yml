@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: mosbot-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-mosbot}
+      POSTGRES_USER: ${DB_USER:-mosbot}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-mosbot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: mosbot-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      TIMEZONE: ${TIMEZONE:-UTC}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-mosbot}
+      DB_USER: ${DB_USER:-mosbot}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      # Bootstrap owner account (first run only — unset after initial setup)
+      BOOTSTRAP_OWNER_EMAIL: ${BOOTSTRAP_OWNER_EMAIL:-}
+      BOOTSTRAP_OWNER_PASSWORD: ${BOOTSTRAP_OWNER_PASSWORD:-}
+      BOOTSTRAP_OWNER_NAME: ${BOOTSTRAP_OWNER_NAME:-}
+      # Archive Job Configuration
+      ENABLE_ARCHIVER: ${ENABLE_ARCHIVER:-true}
+      ARCHIVE_CRON: ${ARCHIVE_CRON:-0 3 * * *}
+      ARCHIVE_AFTER_DAYS: ${ARCHIVE_AFTER_DAYS:-7}
+      ARCHIVE_ON_STARTUP: ${ARCHIVE_ON_STARTUP:-false}
+      # OpenClaw Integration (optional — features degrade gracefully when not set)
+      OPENCLAW_WORKSPACE_URL: ${OPENCLAW_WORKSPACE_URL:-}
+      OPENCLAW_WORKSPACE_TOKEN: ${OPENCLAW_WORKSPACE_TOKEN:-}
+      OPENCLAW_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-}
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-}
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      OPENCLAW_DEVICE_ID: ${OPENCLAW_DEVICE_ID:-}
+      OPENCLAW_DEVICE_PUBLIC_KEY: ${OPENCLAW_DEVICE_PUBLIC_KEY:-}
+      OPENCLAW_DEVICE_PRIVATE_KEY: ${OPENCLAW_DEVICE_PRIVATE_KEY:-}
+      OPENCLAW_DEVICE_TOKEN: ${OPENCLAW_DEVICE_TOKEN:-}
+      # Allow self-signed TLS certs from port-forwarded OpenClaw gateway (local dev only)
+      NODE_TLS_REJECT_UNAUTHORIZED: ${NODE_TLS_REJECT_UNAUTHORIZED:-0}
+      # Subagent Retention
+      SUBAGENT_RETENTION_DAYS: ${SUBAGENT_RETENTION_DAYS:-30}
+      ACTIVITY_LOG_RETENTION_DAYS: ${ACTIVITY_LOG_RETENTION_DAYS:-7}
+      RETENTION_ARCHIVE_ENABLED: ${RETENTION_ARCHIVE_ENABLED:-true}
+      ENABLE_SUBAGENT_RETENTION_PURGE: ${ENABLE_SUBAGENT_RETENTION_PURGE:-true}
+      SUBAGENT_RETENTION_CRON: ${SUBAGENT_RETENTION_CRON:-0 3 * * *}
+      SUBAGENT_RETENTION_ON_STARTUP: ${SUBAGENT_RETENTION_ON_STARTUP:-false}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./src:/app/src
+    command: ["npm", "run", "dev"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  dashboard:
+    build:
+      context: ../mosbot-dashboard
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:3000/api/v1}
+        VITE_APP_NAME: ${VITE_APP_NAME:-MosBot}
+    container_name: mosbot-dashboard
+    depends_on:
+      api:
+        condition: service_healthy
+    # Port is intentionally omitted here — set by each environment:
+    #   dev (override):  5173:5173  (Vite dev server)
+    #   prod:            5173:80    (nginx, set via make up-prod / -f docker-compose.yml)
+    ports: []
+
+volumes:
+  postgres_data:

@@ -1,0 +1,7 @@
+# Production overrides — used by: docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+# Binds the dashboard nginx container to port 5173 on the host.
+
+services:
+  dashboard:
+    ports:
+      - "5173:80"
