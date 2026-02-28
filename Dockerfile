@@ -1,22 +1,21 @@
 # MosBot API - Multi-stage Docker build
-FROM node:18-alpine AS base
+# Use Debian slim for better multi-platform (arm64) build compatibility under QEMU
+FROM node:18-bookworm-slim AS base
 
 # Install security updates and dumb-init for proper signal handling
-RUN apk update && \
-    apk upgrade && \
-    apk add --no-cache dumb-init && \
-    rm -rf /var/cache/apk/*
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends dumb-init && \
+    apt-get clean && rm -rf /var/lib/apt/lists/*
 
-# Create app directory and user
+# App directory (node user already exists in official image)
 WORKDIR /app
-RUN addgroup -g 1000 node && \
-    adduser -u 1000 -G node -s /bin/sh -D node || true
 
 # Production dependencies stage
 FROM base AS dependencies
 WORKDIR /app
 COPY package*.json ./
-RUN npm ci --only=production && \
+RUN npm ci --omit=dev && \
     npm cache clean --force
 
 # Development dependencies stage (for future test/build stages)
