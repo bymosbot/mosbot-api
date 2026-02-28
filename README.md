@@ -105,6 +105,32 @@ Open <http://localhost:5173> and log in with the credentials you set in `BOOTSTR
 
 **After the first login**, remove `BOOTSTRAP_OWNER_PASSWORD` from your `.env`.
 
+### OpenClaw integration (optional)
+
+To use agent management, workspace browsing, and org chart features, MosBot API must reach two OpenClaw endpoints:
+
+| Service | Default port | Purpose |
+| ------- | ------------ | ------- |
+| **Workspace** | `8080` | File access, config, org chart |
+| **Gateway** | `18789` | Runtime control, tool invocation |
+
+**Ensure endpoints are accessible** from wherever the API runs:
+
+- **OpenClaw runs locally** — Use `http://localhost:8080` and `http://localhost:18789` in `.env`.
+- **OpenClaw runs in Kubernetes** — Port-forward both services, then point the API at localhost (or `host.docker.internal` if the API runs in Docker):
+
+  ```bash
+  # Terminal 1: Workspace
+  kubectl port-forward -n <namespace> svc/openclaw-workspace 8080:8080
+
+  # Terminal 2: Gateway
+  kubectl port-forward -n <namespace> svc/openclaw 18789:18789
+  ```
+
+- **OpenClaw runs on a VPS or remote host** — Expose ports 8080 and 18789 on the VPS (firewall/security group). If MosBot API runs on the **same** VPS, use `http://localhost:8080` and `http://localhost:18789`. If the API runs elsewhere, use the VPS hostname or IP (e.g. `http://openclaw.example.com:8080`). Prefer a VPN or private network when exposing these services across the internet.
+
+Add to `.env`: `OPENCLAW_WORKSPACE_URL`, `OPENCLAW_WORKSPACE_TOKEN`, `OPENCLAW_GATEWAY_URL`, `OPENCLAW_GATEWAY_TOKEN`. See [docs/openclaw/README.md](docs/openclaw/README.md) and [docs/guides/openclaw-local-development.md](docs/guides/openclaw-local-development.md) for details.
+
 > **Production build:** to run the dashboard as an optimised nginx bundle instead, use `make up-prod` (or `docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build`). This is only needed for production deployments — day-to-day development uses `make up`.
 
 See [docs/getting-started/first-run.md](docs/getting-started/first-run.md) for the full setup guide.
