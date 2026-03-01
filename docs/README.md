@@ -4,7 +4,7 @@ This is the **canonical documentation home for MosBot OS** — the self-hosted o
 
 MosBot OS is composed of two repos. Docs live alongside the code they describe, but this file is the single entry point for the full system.
 
-> **Note:** A dedicated `mosbot-docs` repo is planned. When it exists, this file will redirect there.
+> **User-facing documentation** is now at **[bymosbot.github.io/mosbot-docs](https://bymosbot.github.io/mosbot-docs/)**. This file indexes developer-focused docs that live alongside the code.
 
 ---
 

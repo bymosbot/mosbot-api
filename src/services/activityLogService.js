@@ -9,10 +9,10 @@
  *   await recordActivityLogEvent({
  *     event_type: 'workspace_file_created',
  *     source: 'workspace',
- *     title: 'File created: /shared/projects/foo/plan.md',
+ *     title: 'File created: /projects/foo/plan.md',
  *     description: 'Agent coo created a new file in the workspace.',
  *     agent_id: 'coo',
- *     workspace_path: '/shared/projects/foo/plan.md',
+ *     workspace_path: '/projects/foo/plan.md',
  *     meta: { size: 1024 },
  *   });
  */

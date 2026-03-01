@@ -2030,7 +2030,7 @@ Response `200`:
         "modified": "2026-02-05T12:34:56.789Z",
         "created": "2026-02-01T10:00:00.000Z",
         "isSymlink": true,
-        "symlinkTarget": "/home/node/.openclaw/shared/docs"
+        "symlinkTarget": "/home/node/.openclaw/docs"
       }
     ]
   }
@@ -2050,7 +2050,7 @@ Errors:
 
 ### GET `/openclaw/workspace/files/content`
 
-Read file content. Paths under `/shared/docs/**` are readable by all authenticated users; all other paths require admin, owner, or agent role.
+Read file content. Paths under `/docs/**` are readable by all authenticated users; all other paths require admin, owner, or agent role.
 
 Query parameters:
 

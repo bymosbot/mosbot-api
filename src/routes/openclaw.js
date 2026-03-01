@@ -74,10 +74,10 @@ function isAllowedWorkspacePath(workspacePath) {
   // Allow system config files
   if (workspacePath === '/openclaw.json' || workspacePath === '/org-chart.json') return true;
 
-  // Allow shared directories
-  if (workspacePath.startsWith('/shared/docs/') || workspacePath === '/shared/docs') return true;
-  if (workspacePath.startsWith('/shared/projects/') || workspacePath === '/shared/projects')
-    return true;
+  // Allow docs and projects directories (moved from /shared/docs and /shared/projects)
+  if (workspacePath.startsWith('/docs/') || workspacePath === '/docs') return true;
+  if (workspacePath.startsWith('/projects/') || workspacePath === '/projects') return true;
+  // Allow other shared directories
   if (workspacePath.startsWith('/shared/scripts/') || workspacePath === '/shared/scripts')
     return true;
 
@@ -146,7 +146,7 @@ router.get('/workspace/files', requireAuth, async (req, res, next) => {
 });
 
 // GET /api/v1/openclaw/workspace/files/content
-// Read file content (admin/owner for all paths, all authenticated users for /shared/docs/**)
+// Read file content (admin/owner for all paths, all authenticated users for /docs/**)
 router.get('/workspace/files/content', requireAuth, async (req, res, next) => {
   try {
     const { path: inputPath } = req.query;
@@ -171,9 +171,8 @@ router.get('/workspace/files/content', requireAuth, async (req, res, next) => {
     }
 
     // Check if this is a docs path (accessible to all authenticated users)
-    // Docs live at /shared/docs/ (shared system directory, not inside any agent workspace)
-    const isDocsPath =
-      workspacePath === '/shared/docs' || workspacePath.startsWith('/shared/docs/');
+    // Docs live at /docs/ (moved from /shared/docs/)
+    const isDocsPath = workspacePath === '/docs' || workspacePath.startsWith('/docs/');
 
     // For non-docs paths, require admin/owner/agent role
     if (!isDocsPath && !['admin', 'agent', 'owner'].includes(req.user?.role)) {

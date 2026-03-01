@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/bymosbot/mosbot-api/actions/workflows/ci.yml/badge.svg)](https://github.com/bymosbot/mosbot-api/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-bymosbot.github.io-blue)](https://bymosbot.github.io/mosbot-docs/)
 
 The **API and backend layer** of [MosBot OS](https://github.com/bymosbot/mosbot-dashboard) — a self-hosted operating system for AI agent work.
 
@@ -159,16 +160,19 @@ make db-reset    # reset database (dev only, destructive)
 
 ## Documentation
 
-- [Getting started](docs/guides/local-development.md)
-- [First-run setup](docs/getting-started/first-run.md)
-- [Configuration reference](docs/configuration.md)
-- [Architecture](docs/architecture.md)
-- [Docker guide](docs/guides/docker.md)
-- [Database migrations](docs/guides/database-migrations.md)
-- [OpenClaw integration](docs/openclaw/README.md)
-- [Deployment](docs/deployment.md)
-- [Security / secrets](docs/security/secrets.md)
-- [API contract](docs/api/openclaw-public-api.md)
+**Full documentation: [bymosbot.github.io/mosbot-docs](https://bymosbot.github.io/mosbot-docs/)**
+
+| Topic | Link |
+| ----- | ---- |
+| Getting started | [Quickstart](https://bymosbot.github.io/mosbot-docs/getting-started/quickstart) |
+| Configuration reference | [Environment variables](https://bymosbot.github.io/mosbot-docs/getting-started/configuration) |
+| OpenClaw integration | [Overview](https://bymosbot.github.io/mosbot-docs/openclaw/overview) |
+| openclaw.json reference | [Configuration reference](https://bymosbot.github.io/mosbot-docs/configuration/openclaw-json) |
+| Deployment | [Docker](https://bymosbot.github.io/mosbot-docs/deployment/docker) · [Kubernetes](https://bymosbot.github.io/mosbot-docs/deployment/kubernetes) |
+| Security | [Secrets management](https://bymosbot.github.io/mosbot-docs/security/secrets) |
+| Troubleshooting | [Common issues](https://bymosbot.github.io/mosbot-docs/troubleshooting/common-issues) |
+
+Developer-focused docs (API internals, migrations, architecture) remain in [`docs/`](docs/README.md).
 
 ## Contributing
 

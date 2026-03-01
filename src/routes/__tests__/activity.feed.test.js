@@ -118,7 +118,26 @@ describe('GET /api/v1/activity/feed', () => {
     expect(links.task.label).toBe('My Task');
   });
 
-  it('computes Projects workspace link for /shared/projects paths', async () => {
+  it('computes Projects workspace link for /projects paths', async () => {
+    const rowWithWorkspace = {
+      ...SAMPLE_ROW,
+      workspace_path: '/projects/foo/plan.md',
+      job_id: null,
+      session_key: null,
+    };
+    pool.query
+      .mockResolvedValueOnce({ rows: [rowWithWorkspace] })
+      .mockResolvedValueOnce({ rows: [{ total: '1' }] });
+
+    const res = await request(app).get('/api/v1/activity/feed');
+
+    expect(res.status).toBe(200);
+    const { links } = res.body.data[0];
+    expect(links.workspace).toBeDefined();
+    expect(links.workspace.href).toBe('/projects');
+  });
+
+  it('computes Projects workspace link for legacy /shared/projects paths (backward compatibility)', async () => {
     const rowWithWorkspace = {
       ...SAMPLE_ROW,
       workspace_path: '/shared/projects/foo/plan.md',

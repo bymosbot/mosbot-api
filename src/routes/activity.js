@@ -57,7 +57,10 @@ function buildLinks(row) {
     links.job = { href: `/scheduler?jobId=${encodeURIComponent(row.job_id)}`, label: 'Scheduler' };
   }
   if (row.workspace_path) {
-    if (row.workspace_path.startsWith('/shared/projects')) {
+    if (
+      row.workspace_path.startsWith('/projects') ||
+      row.workspace_path.startsWith('/shared/projects')
+    ) {
       links.workspace = { href: '/projects', label: 'Projects' };
     } else {
       links.workspace = { href: '/workspaces', label: 'Workspace' };
