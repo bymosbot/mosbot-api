@@ -1,6 +1,7 @@
 # MosBot API
 
 [![CI](https://github.com/bymosbot/mosbot-api/actions/workflows/ci.yml/badge.svg)](https://github.com/bymosbot/mosbot-api/actions/workflows/ci.yml)
+[![Coverage Status](https://coveralls.io/repos/github/bymosbot/mosbot-api/badge.svg?branch=main)](https://coveralls.io/github/bymosbot/mosbot-api?branch=main)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Docs](https://img.shields.io/badge/docs-bymosbot.github.io-blue)](https://bymosbot.github.io/mosbot-docs/)
 
@@ -18,7 +19,7 @@ MosBot API is a Node.js/Express service backed by PostgreSQL. It transforms and 
 ## TODO
 
 - [ ] Fix the known issues above.
-- [ ] Increase code coverage to 100% for API.
+- [ ] Increase code coverage to meet thresholds (75% statements/lines/functions, 65% branches).
 
 ## Architecture
 

@@ -5,3 +5,6 @@
 if (!process.env.JWT_SECRET) {
   process.env.JWT_SECRET = 'test-only-jwt-secret-not-for-production';
 }
+
+// Set environment for fast test execution
+process.env.NODE_ENV = 'test';

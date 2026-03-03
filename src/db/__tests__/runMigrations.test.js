@@ -418,5 +418,87 @@ describe('Migration Runner', () => {
 
       expect(pool.end).not.toHaveBeenCalled();
     });
+
+    it('should run post-migration hooks when they exist', async () => {
+      // Mock post-migration hook exists - override the beforeEach mock
+      fs.existsSync.mockImplementation((path) => {
+        const pathStr = String(path);
+        // Return true for migrations directory and post-migration hook
+        if (pathStr.includes('migrations') && !pathStr.includes('.post.js')) {
+          return true; // migrations directory exists
+        }
+        if (pathStr.includes('001_initial_schema.post.js')) {
+          return true; // post-migration hook exists
+        }
+        return false;
+      });
+
+      const mockPostMigration = jest.fn().mockResolvedValue(undefined);
+      jest.doMock('../migrations/001_initial_schema.post.js', () => mockPostMigration, {
+        virtual: true,
+      });
+
+      mockQuery.mockImplementation((query) => {
+        if (query.includes('pg_try_advisory_lock')) {
+          return Promise.resolve({ rows: [{ acquired: true }] });
+        }
+        if (query.includes('information_schema.tables')) {
+          return Promise.resolve({ rows: [{ '?column?': 1 }] });
+        }
+        if (query.includes('SELECT version FROM schema_migrations')) {
+          return Promise.resolve({ rows: [{ version: '000_bootstrap.sql' }] });
+        }
+        if (query.includes('BEGIN')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (query.includes('COMMIT')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (query.includes('INSERT INTO schema_migrations')) {
+          return Promise.resolve({ rows: [] });
+        }
+        if (query.includes('pg_advisory_unlock')) {
+          return Promise.resolve({ rows: [] });
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      await runMigrations({ endPool: false });
+
+      // Verify post-migration hook was checked
+      expect(fs.existsSync).toHaveBeenCalledWith(
+        expect.stringContaining('001_initial_schema.post.js'),
+      );
+    });
+
+    it('should handle error when releasing advisory lock fails', async () => {
+      mockQuery.mockImplementation((query) => {
+        if (query.includes('pg_try_advisory_lock')) {
+          return Promise.resolve({ rows: [{ acquired: true }] });
+        }
+        if (query.includes('information_schema.tables')) {
+          return Promise.resolve({ rows: [{ '?column?': 1 }] });
+        }
+        if (query.includes('SELECT version FROM schema_migrations')) {
+          return Promise.resolve({
+            rows: [{ version: '000_bootstrap.sql' }, { version: '001_initial_schema.sql' }],
+          });
+        }
+        if (query.includes('pg_advisory_unlock')) {
+          throw new Error('Failed to release lock');
+        }
+        return Promise.resolve({ rows: [] });
+      });
+
+      // Should not throw, just log error
+      await runMigrations({ endPool: false });
+
+      // Verify unlock was attempted
+      expect(mockQuery).toHaveBeenCalledWith(
+        expect.stringContaining('pg_advisory_unlock'),
+        expect.any(Array),
+      );
+      expect(mockClient.release).toHaveBeenCalled();
+    });
   });
 });

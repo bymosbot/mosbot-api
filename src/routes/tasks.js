@@ -1141,13 +1141,13 @@ router.post('/:id/comments', optionalAuth, validateUUID('id'), async (req, res, 
     const { id } = req.params;
     const { body } = req.body || {};
 
-    if (!req.user?.id) {
-      return res.status(401).json({ error: { message: 'Authorization required', status: 401 } });
-    }
-
     const commentBody = typeof body === 'string' ? body.trim() : '';
     if (!commentBody) {
       return res.status(400).json({ error: { message: 'Comment body is required', status: 400 } });
+    }
+
+    if (!req.user?.id) {
+      return res.status(401).json({ error: { message: 'Authorization required', status: 401 } });
     }
 
     if (commentBody.length > 5000) {

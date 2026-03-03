@@ -1319,14 +1319,19 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
             // Build session metadata map (agent_key, model) for session_usage enrichment
             const sessionMetaByKey = new Map();
             for (const s of sessions) {
-              if (!s.key) continue;
+              if (!s.key || typeof s.key !== 'string') continue;
               let agentKey = 'main';
               if (s.key.startsWith('agent:')) {
                 const parts = s.key.split(':');
                 if (parts.length >= 2) agentKey = parts[1];
               }
               let model = null;
-              if (s.modelProvider && s.model) {
+              if (
+                s.modelProvider &&
+                typeof s.modelProvider === 'string' &&
+                s.model &&
+                typeof s.model === 'string'
+              ) {
                 // Normalize double prefixes (e.g., "openrouter/openrouter/..." -> "openrouter/...")
                 let normalizedModel = s.model.trim();
                 const doublePrefixMatch = normalizedModel.match(/^([^/]+)\/\1\/(.+)$/);
@@ -1344,7 +1349,12 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
                 model = s.model;
               } else {
                 const lastMsg = s.messages?.[0];
-                if (lastMsg?.provider && lastMsg?.model) {
+                if (
+                  lastMsg?.provider &&
+                  typeof lastMsg.provider === 'string' &&
+                  lastMsg?.model &&
+                  typeof lastMsg.model === 'string'
+                ) {
                   // Normalize double prefixes
                   let normalizedModel = lastMsg.model.trim();
                   const doublePrefixMatch = normalizedModel.match(/^([^/]+)\/\1\/(.+)$/);
@@ -1639,7 +1649,12 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
       // Tool-invocation sessions have model on the last message.
       const lastMessage = session.messages?.[0] || null;
       let actualModel = null;
-      if (session.modelProvider && session.model) {
+      if (
+        session.modelProvider &&
+        typeof session.modelProvider === 'string' &&
+        session.model &&
+        typeof session.model === 'string'
+      ) {
         // WS RPC shape: modelProvider="openrouter", model="anthropic/claude-sonnet-4.5"
         // Normalize double prefixes (e.g., "openrouter/openrouter/..." -> "openrouter/...")
         let normalizedModel = session.model.trim();
@@ -1654,7 +1669,12 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
         } else {
           actualModel = `${session.modelProvider}/${normalizedModel}`;
         }
-      } else if (lastMessage?.provider && lastMessage?.model) {
+      } else if (
+        lastMessage?.provider &&
+        typeof lastMessage.provider === 'string' &&
+        lastMessage?.model &&
+        typeof lastMessage.model === 'string'
+      ) {
         // Normalize double prefixes
         let normalizedModel = lastMessage.model.trim();
         const doublePrefixMatch = normalizedModel.match(/^([^/]+)\/\1\/(.+)$/);
@@ -1810,10 +1830,13 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
 
       // Extract cleaned group/user name for topic comparison
       // Remove "Telegram:" and "g-" prefixes for consistent comparison
-      let cleanedGroupName = isTelegramSession
-        ? rawLabel.replace(/(?:Telegram|telegram):\s*/gi, '').trim()
-        : rawLabel;
-      if (cleanedGroupName.startsWith('g-')) {
+      let cleanedGroupName =
+        isTelegramSession && typeof rawLabel === 'string'
+          ? rawLabel.replace(/(?:Telegram|telegram):\s*/gi, '').trim()
+          : typeof rawLabel === 'string'
+            ? rawLabel
+            : String(rawLabel || '');
+      if (typeof cleanedGroupName === 'string' && cleanedGroupName.startsWith('g-')) {
         cleanedGroupName = cleanedGroupName.substring(2);
       }
 
@@ -1854,9 +1877,12 @@ router.get('/sessions', requireAuth, async (req, res, next) => {
         // Remove "Telegram:" prefix from label since we'll show a telegram badge instead
         // Also remove "g-" prefix (Telegram group identifier) for cleaner display
         // Extract the actual name/ID without the prefixes
-        let cleanedLabel = rawLabel.replace(/(?:Telegram|telegram):\s*/gi, '').trim();
+        let cleanedLabel =
+          typeof rawLabel === 'string'
+            ? rawLabel.replace(/(?:Telegram|telegram):\s*/gi, '').trim()
+            : String(rawLabel || '');
         // Remove "g-" prefix if present (Telegram group convention)
-        if (cleanedLabel.startsWith('g-')) {
+        if (typeof cleanedLabel === 'string' && cleanedLabel.startsWith('g-')) {
           cleanedLabel = cleanedLabel.substring(2);
         }
 

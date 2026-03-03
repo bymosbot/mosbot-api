@@ -1,0 +1,46 @@
+---
+paths:
+  - "src/**/*.js"
+---
+
+# Contributing — Code Style & Quality
+
+## Do
+
+- Use **single quotes** for string literals.
+- Define route handlers as `async (req, res, next)` and forward errors with `next(error)`.
+- Use parameterized SQL (`$1, $2, ...`) for every query — no exceptions.
+- Return early with a validation error before touching the database.
+- Use `express.Router()` per route file; export with `module.exports = router`.
+- Name branches: `feat/<short-description>`, `fix/<short-description>`, `chore/<short-description>`.
+- Keep PRs focused — one logical change per PR.
+
+## Don't
+
+- Don't interpolate user input into SQL strings.
+- Don't create a new `pg` pool — use the shared pool from `src/db/pool.js`.
+- Don't add routes directly to `app` in `src/index.js` — mount them via the router pattern.
+- Don't merge a PR with failing lint, test, or build checks.
+- Don't commit `node_modules/` or any generated artifact.
+
+## Response shape
+
+```json
+// Success
+{ "data": { ... } }
+
+// List
+{ "data": [], "pagination": { "limit": 20, "offset": 0, "total": 100 } }
+
+// Error
+{ "error": { "message": "...", "status": 400 } }
+```
+
+## PR Checklist
+
+- [ ] `make lint` passes with no new errors
+- [ ] `make test-run` passes
+- [ ] New endpoints follow the response shape above
+- [ ] New DB columns have a migration in `src/db/migrations/`
+- [ ] No secrets, tokens, or internal URLs in code or comments
+- [ ] `.env.example` updated if a new env var was added

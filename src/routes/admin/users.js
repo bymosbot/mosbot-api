@@ -172,7 +172,7 @@ router.get('/:id', validateUUID('id'), async (req, res, next) => {
 // POST /api/v1/admin/users - Create a new user (admin/owner only)
 router.post('/', requireManageUsers, async (req, res, next) => {
   try {
-    const { name, email, password, role = 'user', avatar_url } = req.body;
+    const { name, email, password, role = 'user', avatar_url, agent_id } = req.body;
 
     // Validation
     if (!name || name.trim().length === 0) {
@@ -205,12 +205,41 @@ router.post('/', requireManageUsers, async (req, res, next) => {
       });
     }
 
+    // agent_id is required when role is 'agent'
+    if (role === 'agent' && !agent_id) {
+      return res.status(400).json({
+        error: { message: 'agent_id is required when role is agent', status: 400 },
+      });
+    }
+
+    const slugRegex = /^[a-z0-9_-]+$/;
+    if (agent_id !== undefined && !slugRegex.test(agent_id)) {
+      return res.status(400).json({
+        error: {
+          message: 'agent_id must be a valid slug (lowercase, alphanumeric, hyphens, underscores)',
+          status: 400,
+        },
+      });
+    }
+
     // Check if email already exists
     const existing = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
     if (existing.rows.length > 0) {
       return res.status(409).json({
         error: { message: 'Email already exists', status: 409 },
       });
+    }
+
+    // Check if agent_id is already taken
+    if (agent_id) {
+      const existingAgent = await pool.query('SELECT id FROM users WHERE agent_id = $1', [
+        agent_id,
+      ]);
+      if (existingAgent.rows.length > 0) {
+        return res.status(409).json({
+          error: { message: 'agent_id is already in use by another user', status: 409 },
+        });
+      }
     }
 
     // Hash password
@@ -220,11 +249,11 @@ router.post('/', requireManageUsers, async (req, res, next) => {
     // Create user (default active = true)
     const result = await pool.query(
       `
-      INSERT INTO users (name, email, password_hash, role, avatar_url, active)
-      VALUES ($1, $2, $3, $4, $5, true)
-      RETURNING id, name, email, avatar_url, role, active, created_at
+      INSERT INTO users (name, email, password_hash, role, avatar_url, agent_id, active)
+      VALUES ($1, $2, $3, $4, $5, $6, true)
+      RETURNING id, name, email, avatar_url, role, agent_id, active, created_at
     `,
-      [name, email, password_hash, role, avatar_url],
+      [name, email, password_hash, role, avatar_url, agent_id ?? null],
     );
 
     res.status(201).json({ data: result.rows[0] });
@@ -237,7 +266,7 @@ router.post('/', requireManageUsers, async (req, res, next) => {
 router.put('/:id', requireManageUsers, validateUUID('id'), async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { name, email, password, role, avatar_url, active } = req.body;
+    const { name, email, password, role, avatar_url, active, agent_id } = req.body;
 
     // Check if user exists and get their role and agent_id
     const existing = await pool.query('SELECT id, role, agent_id FROM users WHERE id = $1', [id]);
@@ -337,6 +366,38 @@ router.put('/:id', requireManageUsers, validateUUID('id'), async (req, res, next
       });
     }
 
+    // agent_id is required when the effective role is 'agent'
+    const effectiveRole = role !== undefined ? role : targetUser.role;
+    const effectiveAgentId = agent_id !== undefined ? agent_id : targetUser.agent_id;
+    if (effectiveRole === 'agent' && !effectiveAgentId) {
+      return res.status(400).json({
+        error: { message: 'agent_id is required when role is agent', status: 400 },
+      });
+    }
+
+    const slugRegex = /^[a-z0-9_-]+$/;
+    if (agent_id !== undefined && !slugRegex.test(agent_id)) {
+      return res.status(400).json({
+        error: {
+          message: 'agent_id must be a valid slug (lowercase, alphanumeric, hyphens, underscores)',
+          status: 400,
+        },
+      });
+    }
+
+    // Check if agent_id is taken by another user
+    if (agent_id !== undefined && agent_id !== targetUser.agent_id) {
+      const agentIdCheck = await pool.query(
+        'SELECT id FROM users WHERE agent_id = $1 AND id != $2',
+        [agent_id, id],
+      );
+      if (agentIdCheck.rows.length > 0) {
+        return res.status(409).json({
+          error: { message: 'agent_id is already in use by another user', status: 409 },
+        });
+      }
+    }
+
     // Check if email is taken by another user
     if (email) {
       const emailCheck = await pool.query('SELECT id FROM users WHERE email = $1 AND id != $2', [
@@ -390,6 +451,12 @@ router.put('/:id', requireManageUsers, validateUUID('id'), async (req, res, next
     if (active !== undefined) {
       updates.push(`active = $${paramCount}`);
       params.push(active);
+      paramCount++;
+    }
+
+    if (agent_id !== undefined) {
+      updates.push(`agent_id = $${paramCount}`);
+      params.push(agent_id);
       paramCount++;
     }
 

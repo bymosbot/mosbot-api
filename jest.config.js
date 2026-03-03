@@ -1,7 +1,13 @@
 /** @type {import('jest').Config} */
 module.exports = {
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
-  // Coverage thresholds - raise toward 100% as coverage improves.
-  // Uncomment to enforce on PRs:
-  // coverageThreshold: { global: { statements: 100, branches: 100, functions: 100, lines: 100 } },
+  setupFiles: ['<rootDir>/test.setup.js'], // Additional setup file for console mocking
+  coverageThreshold: {
+    global: {
+      statements: 70,
+      branches: 50,
+      functions: 70,
+      lines: 70,
+    },
+  },
 };

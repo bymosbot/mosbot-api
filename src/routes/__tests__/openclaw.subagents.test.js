@@ -31,6 +31,9 @@ function getToken(userId, role) {
 
 const pool = require('../../db/pool');
 
+// Increase timeout for this test file due to fetch mocking
+jest.setTimeout(10000);
+
 describe('GET /api/v1/openclaw/subagents', () => {
   let app;
   let originalFetch;

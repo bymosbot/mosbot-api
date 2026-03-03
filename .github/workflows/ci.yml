@@ -1,15 +1,20 @@
-name: CI (PR)
+name: CI
 
-# Runs on pull requests to any branch. Enforces lint, tests, and 100% code coverage.
+# Runs on pull requests and pushes to main. Enforces lint, tests, and coverage thresholds.
 
 on:
   pull_request:
     branches: ['**']
+  push:
+    branches: [main]
+  workflow_dispatch:
 
 jobs:
   lint-and-test:
     name: Lint, Test, and Coverage
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     services:
       postgres:
@@ -57,6 +62,13 @@ jobs:
 
       - name: Run tests with coverage
         run: npm run test:coverage
+
+      - name: Upload coverage to Coveralls
+        uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          file: coverage/lcov.info
+          format: lcov
 
   secret-scan:
     name: Secret Scan

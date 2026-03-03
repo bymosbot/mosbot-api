@@ -223,6 +223,11 @@ router.get('/', async (req, res, next) => {
       category,
       agent_id,
       task_id,
+      event_type,
+      severity,
+      source,
+      job_id,
+      session_key,
       limit = 100,
       offset = 0,
       start_date,
@@ -261,6 +266,24 @@ router.get('/', async (req, res, next) => {
     const params = [];
     let paramCount = 1;
 
+    if (event_type) {
+      query += ` AND al.event_type = $${paramCount}`;
+      params.push(event_type);
+      paramCount++;
+    }
+
+    if (severity) {
+      query += ` AND al.severity = $${paramCount}`;
+      params.push(severity);
+      paramCount++;
+    }
+
+    if (source) {
+      query += ` AND al.source = $${paramCount}`;
+      params.push(source);
+      paramCount++;
+    }
+
     if (category) {
       query += ` AND al.category = $${paramCount}`;
       params.push(category);
@@ -276,6 +299,18 @@ router.get('/', async (req, res, next) => {
     if (task_id) {
       query += ` AND al.task_id = $${paramCount}`;
       params.push(task_id);
+      paramCount++;
+    }
+
+    if (job_id) {
+      query += ` AND al.job_id = $${paramCount}`;
+      params.push(job_id);
+      paramCount++;
+    }
+
+    if (session_key) {
+      query += ` AND al.session_key = $${paramCount}`;
+      params.push(session_key);
       paramCount++;
     }
 

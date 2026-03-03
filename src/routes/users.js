@@ -26,7 +26,8 @@ router.get('/', async (req, res, next) => {
     const { limit = 100, offset = 0, search, active_only } = req.query;
 
     // Validate pagination parameters
-    const limitNum = Math.max(1, Math.min(parseInt(limit) || 100, 1000));
+    const parsedLimit = limit !== undefined ? parseInt(limit) : 100;
+    const limitNum = Math.max(1, Math.min(isNaN(parsedLimit) ? 100 : parsedLimit, 1000));
     const offsetNum = Math.max(0, parseInt(offset) || 0);
 
     let query = 'SELECT id, name, email, avatar_url, active, created_at, updated_at FROM users';

@@ -149,4 +149,176 @@ describe('GET /api/v1/models', () => {
     expect(response.body.data.models).toEqual([]);
     expect(response.body.data.defaultModel).toBe(null);
   });
+
+  it('should return empty list when OpenClaw service is unavailable', async () => {
+    // Mock service unavailable error
+    const error = new Error('Service unavailable');
+    error.code = 'SERVICE_UNAVAILABLE';
+    error.status = 503;
+    makeOpenClawRequest.mockRejectedValue(error);
+
+    const response = await request(app).get('/api/v1/models');
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.models).toEqual([]);
+    expect(response.body.data.defaultModel).toBe(null);
+  });
+
+  it('should handle missing models object', async () => {
+    makeOpenClawRequest.mockResolvedValue({
+      content: JSON.stringify({
+        agents: {
+          defaults: {
+            model: {
+              primary: 'openrouter/anthropic/claude-sonnet-4.5',
+            },
+            // models is missing
+          },
+        },
+      }),
+    });
+
+    const response = await request(app).get('/api/v1/models');
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.models).toEqual([]);
+  });
+
+  it('should handle missing default model', async () => {
+    makeOpenClawRequest.mockResolvedValue({
+      content: JSON.stringify({
+        agents: {
+          defaults: {
+            models: {
+              'openrouter/anthropic/claude-sonnet-4.5': {
+                alias: 'Claude Sonnet 4.5',
+                params: {},
+              },
+            },
+            // model.primary is missing
+          },
+        },
+      }),
+    });
+
+    const response = await request(app).get('/api/v1/models');
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.defaultModel).toBe(null);
+    expect(response.body.data.models[0].isDefault).toBe(false);
+  });
+
+  it('should handle model without alias', async () => {
+    makeOpenClawRequest.mockResolvedValue({
+      content: JSON.stringify({
+        agents: {
+          defaults: {
+            model: {
+              primary: 'openrouter/anthropic/claude-sonnet-4.5',
+            },
+            models: {
+              'openrouter/anthropic/claude-sonnet-4.5': {
+                // alias is missing
+                params: {},
+              },
+            },
+          },
+        },
+      }),
+    });
+
+    const response = await request(app).get('/api/v1/models');
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.models[0].alias).toBe('claude-sonnet-4.5');
+  });
+
+  it('should handle model without params', async () => {
+    makeOpenClawRequest.mockResolvedValue({
+      content: JSON.stringify({
+        agents: {
+          defaults: {
+            model: {
+              primary: 'openrouter/anthropic/claude-sonnet-4.5',
+            },
+            models: {
+              'openrouter/anthropic/claude-sonnet-4.5': {
+                alias: 'Claude Sonnet 4.5',
+                // params is missing
+              },
+            },
+          },
+        },
+      }),
+    });
+
+    const response = await request(app).get('/api/v1/models');
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.models[0].params).toEqual({});
+  });
+
+  it('should handle model ID with no segments', async () => {
+    makeOpenClawRequest.mockResolvedValue({
+      content: JSON.stringify({
+        agents: {
+          defaults: {
+            model: {
+              primary: 'simple-model-name',
+            },
+            models: {
+              'simple-model-name': {
+                alias: 'Simple Model',
+                params: {},
+              },
+            },
+          },
+        },
+      }),
+    });
+
+    const response = await request(app).get('/api/v1/models');
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.models[0].name).toBe('Simple Model Name');
+  });
+
+  it('should propagate other errors', async () => {
+    // Mock a different error (not SERVICE_NOT_CONFIGURED or SERVICE_UNAVAILABLE)
+    const error = new Error('Network error');
+    error.code = 'NETWORK_ERROR';
+    makeOpenClawRequest.mockRejectedValue(error);
+
+    const response = await request(app).get('/api/v1/models');
+
+    expect(response.status).toBe(500);
+  });
+});
+
+describe('getProviderForModel helper', () => {
+  const { getProviderForModel } = require('../models');
+
+  it('should return provider from model ID with two segments', () => {
+    expect(getProviderForModel('openrouter/anthropic/claude-sonnet-4.5')).toBe('anthropic');
+  });
+
+  it('should return provider from model ID with multiple segments', () => {
+    expect(getProviderForModel('openrouter/anthropic/claude/haiku')).toBe('anthropic');
+  });
+
+  it('should return null for model ID with less than two segments', () => {
+    expect(getProviderForModel('claude-sonnet-4.5')).toBe(null);
+  });
+
+  it('should return null for empty model ID', () => {
+    expect(getProviderForModel('')).toBe(null);
+  });
+
+  it('should return null for null model ID', () => {
+    expect(getProviderForModel(null)).toBe(null);
+  });
+
+  it('should return null for undefined model ID', () => {
+    expect(getProviderForModel(undefined)).toBe(null);
+  });
 });

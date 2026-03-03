@@ -11,12 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Committed `docker-compose.override.yml` for local development convenience (auto-loaded by docker compose)
 - Development override swaps production nginx dashboard for Vite dev server with HMR and bind-mounted source
+- Comprehensive test suite covering config, app entry point, database migrations, jobs (archiveDoneTasks, runDailyStandup), routes (activity, auth, models, openclaw, standups, tasks, users, admin/users agent-config), services (activityLogService, modelPricingService, openclawGatewayClient, openclawWorkspaceClient, sessionUsageService, standupService, subagentsRuntimeService), and utilities (configParser, jwt, logger)
+- `.claude/` project rules and configuration (CLAUDE.md + rules for architecture, contributing, openclaw, security, testing)
 
 ### Changed
 
 - Improved CORS configuration to handle requests with no origin (mobile apps, curl requests)
 - Updated Helmet security middleware configuration with crossOriginResourcePolicy
 - Reordered middleware (CORS before Helmet) to avoid configuration conflicts
+- CI workflow updated to include test execution step
+- Jest config updated to support full test suite
+- Various route and service refinements to support test coverage (activity, openclaw, admin/users, tasks, users)
+- `.gitignore` updated to exclude additional generated files
 
 ## [0.1.2] - 2026-03-01
 

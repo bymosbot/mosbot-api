@@ -31,6 +31,10 @@ k8s/overlays/*/secret.yaml
 *.swp
 *.swo
 
+# Claude Code — personal settings (team settings.json is committed, local overrides are not)
+.claude/settings.local.json
+.claude/projects/
+
 # OS
 .DS_Store
 Thumbs.db

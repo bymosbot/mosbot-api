@@ -33,11 +33,14 @@ async function archiveDoneTasks(archiveAfterDays = 7) {
     try {
       // Optional: Backfill existing DONE tasks with done_at if NULL
       // This handles tasks that were marked DONE before the done_at column was added
-      await client.query(`
-        UPDATE tasks 
-        SET done_at = updated_at 
+      await client.query(
+        `
+        UPDATE tasks
+        SET done_at = updated_at
         WHERE status = 'DONE' AND done_at IS NULL
-      `);
+      `,
+        [],
+      );
 
       // Archive tasks that have been DONE for more than archiveAfterDays
       // Use CTE to capture both old and new values for logging
@@ -45,10 +48,10 @@ async function archiveDoneTasks(archiveAfterDays = 7) {
       const result = await client.query(
         `
         WITH archived_tasks AS (
-          UPDATE tasks 
-          SET status = 'ARCHIVE', archived_at = NOW() 
-          WHERE status = 'DONE' 
-            AND done_at IS NOT NULL 
+          UPDATE tasks
+          SET status = 'ARCHIVE', archived_at = NOW()
+          WHERE status = 'DONE'
+            AND done_at IS NOT NULL
             AND done_at <= NOW() - make_interval(days => $1)
           RETURNING id, title, done_at
         )
@@ -57,7 +60,8 @@ async function archiveDoneTasks(archiveAfterDays = 7) {
         [archiveAfterDays],
       );
 
-      archivedCount = result.rows.length;
+      // Handle the case where result might not have rows property
+      archivedCount = result && result.rows ? result.rows.length : 0;
 
       if (archivedCount > 0) {
         logger.info(`Archived ${archivedCount} task(s)`, { count: archivedCount });
@@ -90,9 +94,13 @@ async function archiveDoneTasks(archiveAfterDays = 7) {
       throw txError;
     }
 
-    // Release advisory lock
-    await client.query('SELECT pg_advisory_unlock($1)', [ARCHIVER_LOCK_ID]);
-    logger.info('Released advisory lock');
+    // Release advisory lock - handle failure gracefully since the main work is done
+    try {
+      await client.query('SELECT pg_advisory_unlock($1)', [ARCHIVER_LOCK_ID]);
+      logger.info('Released advisory lock');
+    } catch (unlockError) {
+      logger.error('Failed to release advisory lock', { error: unlockError.message });
+    }
 
     return archivedCount;
   } catch (error) {

@@ -711,5 +711,92 @@ describe('Standups CRUD (Unit Tests)', () => {
 
       expect(res.status).toBe(400);
     });
+
+    it('should handle database error on GET /standups', async () => {
+      mockAuthUser('user');
+      pool.query.mockRejectedValueOnce(new Error('Database connection failed'));
+
+      const res = await request(app)
+        .get('/api/v1/standups')
+        .set('Authorization', `Bearer ${makeToken('user-id', 'user')}`);
+
+      expect(res.status).toBe(500);
+    });
+
+    it('should handle database error on GET /standups/latest', async () => {
+      mockAuthUser('user');
+      pool.query.mockRejectedValueOnce(new Error('Database connection failed'));
+
+      const res = await request(app)
+        .get('/api/v1/standups/latest')
+        .set('Authorization', `Bearer ${makeToken('user-id', 'user')}`);
+
+      expect(res.status).toBe(500);
+    });
+
+    it('should return 400 when timezone is missing on POST', async () => {
+      mockAuthUser('admin');
+      const res = await request(app)
+        .post('/api/v1/standups')
+        .set('Authorization', `Bearer ${makeToken('a', 'admin')}`)
+        .send({
+          standup_date: '2026-02-18',
+          title: 'Test Standup',
+          // timezone is missing
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.message).toContain('timezone');
+    });
+
+    it('should return 400 when timezone is empty on POST', async () => {
+      mockAuthUser('admin');
+      const res = await request(app)
+        .post('/api/v1/standups')
+        .set('Authorization', `Bearer ${makeToken('a', 'admin')}`)
+        .send({
+          standup_date: '2026-02-18',
+          title: 'Test Standup',
+          timezone: '   ',
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error.message).toContain('timezone');
+    });
+
+    it('should handle database error on POST /standups', async () => {
+      mockAuthUser('admin');
+      pool.query.mockRejectedValueOnce(new Error('Database connection failed'));
+
+      const res = await request(app)
+        .post('/api/v1/standups')
+        .set('Authorization', `Bearer ${makeToken('a', 'admin')}`)
+        .send({
+          standup_date: '2026-02-18',
+          title: 'Test Standup',
+          timezone: 'UTC',
+        });
+
+      expect(res.status).toBe(500);
+    });
+
+    it('should handle duplicate standup_date error (23505)', async () => {
+      mockAuthUser('admin');
+      const error = new Error('Duplicate key');
+      error.code = '23505';
+      pool.query.mockRejectedValueOnce(error);
+
+      const res = await request(app)
+        .post('/api/v1/standups')
+        .set('Authorization', `Bearer ${makeToken('a', 'admin')}`)
+        .send({
+          standup_date: '2026-02-18',
+          title: 'Test Standup',
+          timezone: 'UTC',
+        });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error.message).toContain('already exists');
+    });
   });
 });

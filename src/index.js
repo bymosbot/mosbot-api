@@ -112,6 +112,9 @@ async function start() {
   startActivityIngestionPollers();
 }
 
-start();
+// Only start server if not in test mode (allows tests to import app without starting server)
+if (config.nodeEnv !== 'test') {
+  start();
+}
 
 module.exports = app;

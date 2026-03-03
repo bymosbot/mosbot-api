@@ -297,6 +297,10 @@ function startSessionUsagePoller(intervalMs = 60_000) {
 }
 
 module.exports = {
+  deriveAgentKeyFromSessionKey,
+  extractModel,
+  deriveJobIdFromSessionKey,
+  toHourBucket,
   upsertSessionUsageBatch,
   syncSessionUsageFromGateway,
   startSessionUsagePoller,
