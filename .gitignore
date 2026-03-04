@@ -6,6 +6,7 @@ node_modules/
 .env.bak
 .env.local
 .env.*.local
+.envrc
 
 # K8s secrets (never commit actual secrets)
 k8s/base/secret.yaml
