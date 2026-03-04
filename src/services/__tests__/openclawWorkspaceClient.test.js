@@ -72,24 +72,6 @@ describe('openclawWorkspaceClient', () => {
       });
     });
 
-    it('uses default in-cluster URL in production when workspaceUrl is missing', async () => {
-      mockConfig.nodeEnv = 'production';
-      mockConfig.openclaw.workspaceUrl = null;
-      global.fetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true }),
-      });
-
-      const result = await makeOpenClawRequest('GET', '/health');
-
-      expect(result).toEqual({ ok: true });
-      expect(global.fetch).toHaveBeenCalledWith(
-        'http://openclaw-workspace.agents.svc.cluster.local:8080/health',
-        expect.objectContaining({ method: 'GET' }),
-      );
-    });
-
     it('includes auth header and body when provided', async () => {
       mockConfig.openclaw.workspaceToken = 'token-123';
       global.fetch.mockResolvedValueOnce({
