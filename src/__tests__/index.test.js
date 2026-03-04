@@ -19,7 +19,10 @@ jest.mock('../services/openclawGatewayClient', () => ({
   warnIfDeviceAuthNotConfigured: jest.fn(),
 }));
 jest.mock('../services/docsLinkReconciliationService', () => ({
-  ensureDocsLinkIfMissing: jest.fn().mockResolvedValue({ action: 'unchanged' }),
+  reconcileDocsLinksOnStartup: jest.fn().mockResolvedValue({
+    main: { action: 'unchanged' },
+    agents: [],
+  }),
 }));
 jest.mock('../utils/logger', () => ({
   info: jest.fn(),

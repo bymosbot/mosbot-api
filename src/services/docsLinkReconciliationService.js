@@ -1,5 +1,9 @@
 const logger = require('../utils/logger');
-const { getWorkspaceLink, ensureWorkspaceLink } = require('./openclawWorkspaceClient');
+const {
+  getWorkspaceLink,
+  ensureWorkspaceLink,
+  getFileContent,
+} = require('./openclawWorkspaceClient');
 
 /**
  * Ensure docs link exists for one workspace target.
@@ -50,6 +54,58 @@ async function ensureDocsLinkIfMissing(agentId) {
   }
 }
 
+function collectAgentIdsFromOpenClawConfig(content) {
+  if (!content) return [];
+
+  try {
+    const parsed = JSON.parse(content);
+    const agentsList = Array.isArray(parsed?.agents?.list) ? parsed.agents.list : [];
+    const ids = agentsList
+      .map((agent) => (typeof agent?.id === 'string' ? agent.id.trim() : ''))
+      .filter(Boolean)
+      .filter((id) => id !== 'main');
+    return [...new Set(ids)];
+  } catch (error) {
+    logger.warn('Docs link startup reconciliation: could not parse openclaw.json', {
+      message: error.message,
+    });
+    return [];
+  }
+}
+
+/**
+ * Startup reconciliation: ensure docs links for main and all configured OpenClaw agents.
+ * This helper is intentionally non-fatal.
+ *
+ * @returns {Promise<{main: object, agents: object[]}>}
+ */
+async function reconcileDocsLinksOnStartup() {
+  const mainResult = await ensureDocsLinkIfMissing('main');
+
+  let agentIds = [];
+  try {
+    const openclawContent = await getFileContent('/openclaw.json');
+    agentIds = collectAgentIdsFromOpenClawConfig(openclawContent);
+  } catch (error) {
+    logger.warn('Docs link startup reconciliation: failed to read openclaw.json', {
+      message: error.message,
+      status: error.status,
+      code: error.code,
+    });
+    return { main: mainResult, agents: [] };
+  }
+
+  const agentResults = [];
+  for (const agentId of agentIds) {
+    const result = await ensureDocsLinkIfMissing(agentId);
+    agentResults.push(result);
+  }
+
+  return { main: mainResult, agents: agentResults };
+}
+
 module.exports = {
   ensureDocsLinkIfMissing,
+  reconcileDocsLinksOnStartup,
+  collectAgentIdsFromOpenClawConfig,
 };

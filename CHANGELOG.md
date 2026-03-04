@@ -31,7 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Various route and service refinements to support test coverage (activity, openclaw, admin/users, tasks, users)
 - `.gitignore` updated to exclude additional generated files
 - Documentation references updated for OpenClaw path changes
-- API startup now performs non-fatal docs-link reconciliation for `main`
+- API startup now performs non-fatal docs-link reconciliation for `main` and configured agents from `openclaw.json`
 - Agent configuration create/update flows now trigger non-fatal docs-link reconciliation for affected agents
 - Docs-link reconciliation remains internal-only in this phase (no public Mosbot API link-management endpoint; dashboard does not trigger writes)
 

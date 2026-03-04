@@ -32,7 +32,7 @@ If the workspace service supports atomic create (e.g. Node `fs.open(path, 'wx')`
 
 Mosbot API manages shared docs-link bootstrap internally; the dashboard does not perform link writes.
 
-- On API startup, Mosbot attempts a non-fatal reconcile for `main` docs (`agentId=main`)
+- On API startup, Mosbot attempts non-fatal reconcile for `main` plus all agent IDs in `openclaw.json` (`agents.list`)
 - On agent config create/update flows, Mosbot attempts a non-fatal reconcile for that agent
 - Reconcile behavior:
   - `GET /links/docs/:agentId`

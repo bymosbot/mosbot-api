@@ -3,13 +3,16 @@ describe('index startup lifecycle', () => {
     jest.resetModules();
   });
 
-  it('reconciles main docs link on startup in non-test mode', async () => {
+  it('runs docs link startup reconciliation in non-test mode', async () => {
     const startupListen = jest.fn((port, callback) => {
       if (callback) callback();
       return { close: jest.fn() };
     });
     const runMigrations = jest.fn().mockResolvedValue(undefined);
-    const ensureDocsLinkIfMissing = jest.fn().mockResolvedValue({ action: 'unchanged' });
+    const reconcileDocsLinksOnStartup = jest.fn().mockResolvedValue({
+      main: { action: 'unchanged' },
+      agents: [],
+    });
     const startSessionUsagePoller = jest.fn();
     const startPricingRefreshJob = jest.fn();
     const startActivityIngestionPollers = jest.fn();
@@ -29,7 +32,7 @@ describe('index startup lifecycle', () => {
       warnIfDeviceAuthNotConfigured,
     }));
     jest.doMock('../services/docsLinkReconciliationService', () => ({
-      ensureDocsLinkIfMissing,
+      reconcileDocsLinksOnStartup,
     }));
     jest.doMock('../utils/logger', () => ({
       info: jest.fn(),
@@ -60,7 +63,7 @@ describe('index startup lifecycle', () => {
 
     expect(runMigrations).toHaveBeenCalledWith({ endPool: false });
     expect(startupListen).toHaveBeenCalled();
-    expect(ensureDocsLinkIfMissing).toHaveBeenCalledWith('main');
+    expect(reconcileDocsLinksOnStartup).toHaveBeenCalledTimes(1);
     expect(startSessionUsagePoller).toHaveBeenCalled();
     expect(startPricingRefreshJob).toHaveBeenCalled();
     expect(startActivityIngestionPollers).toHaveBeenCalled();
