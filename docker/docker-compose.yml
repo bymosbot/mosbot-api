@@ -1,0 +1,223 @@
+# Full-stack test harness for MosBot + OpenClaw integration testing.
+# Run from mosbot-api/docker/:  make setup && make up
+#
+# This is NOT the production compose — it is for local development and testing only.
+# All services run in development mode with hot-reload where applicable.
+
+services:
+  openclaw-gateway:
+    image: ${OPENCLAW_IMAGE:-alpine/openclaw:latest}
+    container_name: openclaw-gateway
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
+      CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
+      CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
+      CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
+      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+      ## Uncomment the lines below to enable sandbox isolation
+      ## (agents.defaults.sandbox). Requires Docker CLI in the image
+      ## (build with --build-arg OPENCLAW_INSTALL_DOCKER_CLI=1) or use
+      ## docker-setup.sh with OPENCLAW_SANDBOX=1 for automated setup.
+      ## Set DOCKER_GID to the host's docker group GID (run: stat -c '%g' /var/run/docker.sock).
+      # - /var/run/docker.sock:/var/run/docker.sock
+    # group_add:
+    #   - "${DOCKER_GID:-999}"
+    ports:
+      - "${OPENCLAW_GATEWAY_PORT:-18789}:18789"
+      - "${OPENCLAW_BRIDGE_PORT:-18790}:18790"
+    init: true
+    restart: unless-stopped
+    command:
+      [
+        "node",
+        "dist/index.js",
+        "gateway",
+        "--bind",
+        "${OPENCLAW_GATEWAY_BIND:-lan}",
+        "--port",
+        "18789",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:18789/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  openclaw-cli:
+    image: ${OPENCLAW_IMAGE:-alpine/openclaw:latest}
+    network_mode: "service:openclaw-gateway"
+    cap_drop:
+      - NET_RAW
+      - NET_ADMIN
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      HOME: /home/node
+      TERM: xterm-256color
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN}
+      OPENCLAW_ALLOW_INSECURE_PRIVATE_WS: ${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}
+      BROWSER: echo
+      CLAUDE_AI_SESSION_KEY: ${CLAUDE_AI_SESSION_KEY:-}
+      CLAUDE_WEB_SESSION_KEY: ${CLAUDE_WEB_SESSION_KEY:-}
+      CLAUDE_WEB_COOKIE: ${CLAUDE_WEB_COOKIE:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+    volumes:
+      - ${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw
+      - ${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace
+    stdin_open: true
+    tty: true
+    init: true
+    entrypoint: ["node", "dist/index.js"]
+    depends_on:
+      - openclaw-gateway
+
+  workspace:
+    build:
+      context: ../../mosbot-workspace-service/
+      dockerfile: Dockerfile
+      target: development
+    container_name: mosbot-workspace
+    environment:
+      NODE_ENV: development
+      WORKSPACE_SERVICE_TOKEN: ${OPENCLAW_WORKSPACE_TOKEN:?OPENCLAW_WORKSPACE_TOKEN is required}
+      CONFIG_ROOT: /openclaw-config
+      MAIN_WORKSPACE_DIR: workspace
+    volumes:
+      - ../../mosbot-workspace-service/src:/app/src
+      - ${OPENCLAW_CONFIG_DIR}:/openclaw-config
+    ports:
+      - "18780:18780"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'node -e "require(''http'').get(''http://localhost:18780/health'', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on(''error'', () => process.exit(1))"',
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  api:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+      target: development
+    container_name: mosbot-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      workspace:
+        condition: service_healthy
+      openclaw-gateway:
+        condition: service_healthy
+    environment:
+      NODE_ENV: development
+      PORT: 3000
+      TIMEZONE: ${TIMEZONE:-UTC}
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${DB_NAME:-mosbot}
+      DB_USER: ${DB_USER:-mosbot}
+      DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+      # Bootstrap owner account (first run only — unset after initial setup)
+      BOOTSTRAP_OWNER_EMAIL: ${BOOTSTRAP_OWNER_EMAIL:-mosbot@gmail.com}
+      BOOTSTRAP_OWNER_PASSWORD: ${BOOTSTRAP_OWNER_PASSWORD:-}
+      BOOTSTRAP_OWNER_NAME: ${BOOTSTRAP_OWNER_NAME:-Admin}
+      # Archive Job Configuration
+      ENABLE_ARCHIVER: ${ENABLE_ARCHIVER:-true}
+      ARCHIVE_CRON: ${ARCHIVE_CRON:-0 3 * * *}
+      ARCHIVE_AFTER_DAYS: ${ARCHIVE_AFTER_DAYS:-7}
+      ARCHIVE_ON_STARTUP: ${ARCHIVE_ON_STARTUP:-false}
+      # OpenClaw Integration (connected to co-located services)
+      OPENCLAW_WORKSPACE_URL: ${OPENCLAW_WORKSPACE_URL:-http://workspace:18780}
+      OPENCLAW_WORKSPACE_TOKEN: ${OPENCLAW_WORKSPACE_TOKEN:-}
+      OPENCLAW_CONFIG_PATH: ${OPENCLAW_CONFIG_PATH:-}
+      OPENCLAW_GATEWAY_URL: ${OPENCLAW_GATEWAY_URL:-http://openclaw-gateway:18789}
+      OPENCLAW_GATEWAY_TOKEN: ${OPENCLAW_GATEWAY_TOKEN:-}
+      OPENCLAW_DEVICE_ID: ${OPENCLAW_DEVICE_ID:-}
+      OPENCLAW_DEVICE_PUBLIC_KEY: ${OPENCLAW_DEVICE_PUBLIC_KEY:-}
+      OPENCLAW_DEVICE_PRIVATE_KEY: ${OPENCLAW_DEVICE_PRIVATE_KEY:-}
+      OPENCLAW_DEVICE_TOKEN: ${OPENCLAW_DEVICE_TOKEN:-}
+      OPENCLAW_GATEWAY_TIMEOUT_MS: ${OPENCLAW_GATEWAY_TIMEOUT_MS:-15000}
+      # Subagent Retention
+      SUBAGENT_RETENTION_DAYS: ${SUBAGENT_RETENTION_DAYS:-30}
+      ACTIVITY_LOG_RETENTION_DAYS: ${ACTIVITY_LOG_RETENTION_DAYS:-7}
+      RETENTION_ARCHIVE_ENABLED: ${RETENTION_ARCHIVE_ENABLED:-true}
+      ENABLE_SUBAGENT_RETENTION_PURGE: ${ENABLE_SUBAGENT_RETENTION_PURGE:-true}
+      SUBAGENT_RETENTION_CRON: ${SUBAGENT_RETENTION_CRON:-0 3 * * *}
+      SUBAGENT_RETENTION_ON_STARTUP: ${SUBAGENT_RETENTION_ON_STARTUP:-false}
+    ports:
+      - "3000:3000"
+    volumes:
+      - ../src:/app/src
+    command: ["npm", "run", "dev"]
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'node -e "require(''http'').get(''http://localhost:3000/health'', (r) => process.exit(r.statusCode === 200 ? 0 : 1)).on(''error'', () => process.exit(1))"',
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  dashboard:
+    build:
+      context: ../../mosbot-dashboard
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:3000/api/v1}
+        VITE_APP_NAME: ${VITE_APP_NAME:-MosBot}
+      target: development
+    container_name: mosbot-dashboard
+    ports:
+      - "5173:5173"
+    environment:
+      NODE_ENV: development
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:3000/api/v1}
+      VITE_APP_NAME: ${VITE_APP_NAME:-MosBot}
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "1000"
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
+    volumes:
+      - ../../mosbot-dashboard:/app
+      - mosbot_dashboard_node_modules:/app/node_modules
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: mosbot-postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-mosbot}
+      POSTGRES_USER: ${DB_USER:-mosbot}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-mosbot}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-mosbot}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  postgres_data:
+  mosbot_dashboard_node_modules:

@@ -83,6 +83,7 @@ services:
     build:
       context: ../mosbot-dashboard
       dockerfile: Dockerfile
+      target: development
       args:
         VITE_API_URL: ${VITE_API_URL:-http://localhost:3000/api/v1}
         VITE_APP_NAME: ${VITE_APP_NAME:-MosBot}
@@ -90,10 +91,18 @@ services:
     depends_on:
       api:
         condition: service_healthy
-    # Port is intentionally omitted here — set by each environment:
-    #   dev (override):  5173:5173  (Vite dev server)
-    #   prod:            5173:80    (nginx, set via make up-prod / -f docker-compose.yml)
-    ports: []
+    environment:
+      NODE_ENV: development
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:3000/api/v1}
+      VITE_APP_NAME: ${VITE_APP_NAME:-MosBot}
+      CHOKIDAR_USEPOLLING: "true"
+      CHOKIDAR_INTERVAL: "1000"
+    ports:
+      - "5173:5173"
+    volumes:
+      - ../mosbot-dashboard:/app
+      - /app/node_modules
+    command: ["npm", "run", "dev", "--", "--host", "0.0.0.0", "--port", "5173"]
 
 volumes:
   postgres_data:

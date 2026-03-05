@@ -1,11 +1,10 @@
-.PHONY: help up up-prod down dev lint test test-run build migrate db-reset
+.PHONY: help up down dev lint test test-run build migrate db-reset
 
 # Default target
 help:
 	@echo "MosBot API — available commands:"
 	@echo ""
-	@echo "  make up         Start full stack in dev mode (Vite HMR dashboard + API + Postgres)"
-	@echo "  make up-prod    Start full stack with production dashboard build (nginx)"
+	@echo "  make up         Start dev stack (API + Dashboard + Postgres)"
 	@echo "  make down       Stop and remove containers"
 	@echo "  make dev        Start API in local dev mode (requires Postgres running separately)"
 	@echo "  make lint       Run ESLint"
@@ -19,12 +18,13 @@ help:
 	@echo "  1. cp .env.example .env && \$$EDITOR .env"
 	@echo "  2. make up"
 	@echo "  See docs/getting-started/first-run.md for full instructions."
+	@echo ""
+	@echo "Full-stack testing (with OpenClaw):"
+	@echo "  cd docker && make setup && make up"
+	@echo "  See docs/guides/docker.md for details."
 
 up:
-	docker compose up -d
-
-up-prod:
-	docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+	DOCKER_BUILDKIT=0 docker compose up -d
 
 down:
 	docker compose down

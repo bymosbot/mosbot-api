@@ -1,0 +1,653 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# ── MosBot full-stack test harness setup ──────────────────────────────────
+# Adapted from the OpenClaw docker-setup.sh for use as a self-contained
+# test environment inside mosbot-api/docker/.
+#
+# Usage:
+#   ./docker-setup.sh          First-time setup (OpenClaw onboarding + .env generation)
+#   ./docker-setup.sh reset    Tear down everything: containers, volumes, DB, OpenClaw config
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="$ROOT_DIR/docker-compose.yml"
+EXTRA_COMPOSE_FILE="$ROOT_DIR/docker-compose.extra.yml"
+IMAGE_NAME="${OPENCLAW_IMAGE:-alpine/openclaw:latest}"
+EXTRA_MOUNTS="${OPENCLAW_EXTRA_MOUNTS:-}"
+HOME_VOLUME_NAME="${OPENCLAW_HOME_VOLUME:-}"
+RAW_SANDBOX_SETTING="${OPENCLAW_SANDBOX:-}"
+SANDBOX_ENABLED=""
+DOCKER_SOCKET_PATH="${OPENCLAW_DOCKER_SOCKET:-}"
+
+# ── Reset subcommand ─────────────────────────────────────────────────────
+
+if [[ "${1:-}" == "reset" ]]; then
+  echo "==> Resetting MosBot test harness"
+  echo ""
+
+  # Stop containers and remove volumes
+  echo "Stopping containers and removing volumes..."
+  docker compose -f "$COMPOSE_FILE" down -v 2>/dev/null || true
+
+  # Remove generated .env
+  if [[ -f "$ROOT_DIR/.env" ]]; then
+    rm "$ROOT_DIR/.env"
+    echo "Removed $ROOT_DIR/.env"
+  fi
+
+  # Remove compose overlay files
+  rm -f "$ROOT_DIR/docker-compose.extra.yml"
+  rm -f "$ROOT_DIR/docker-compose.sandbox.yml"
+
+  # Clean openclaw-config — remove everything except .gitkeep
+  if [[ -d "$ROOT_DIR/openclaw-config" ]]; then
+    find "$ROOT_DIR/openclaw-config" -mindepth 1 -not -name '.gitkeep' -exec rm -rf {} + 2>/dev/null || true
+    echo "Cleaned openclaw-config/"
+  fi
+
+  echo ""
+  echo "Reset complete. Run './docker-setup.sh' to set up again."
+  exit 0
+fi
+
+# ── Helpers ───────────────────────────────────────────────────────────────
+
+fail() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Missing dependency: $1" >&2
+    exit 1
+  fi
+}
+
+is_truthy_value() {
+  local raw="${1:-}"
+  raw="$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+  case "$raw" in
+    1 | true | yes | on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+read_config_gateway_token() {
+  local config_path="$OPENCLAW_CONFIG_DIR/openclaw.json"
+  if [[ ! -f "$config_path" ]]; then
+    return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$config_path" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+except Exception:
+    raise SystemExit(0)
+
+gateway = cfg.get("gateway")
+if not isinstance(gateway, dict):
+    raise SystemExit(0)
+auth = gateway.get("auth")
+if not isinstance(auth, dict):
+    raise SystemExit(0)
+token = auth.get("token")
+if isinstance(token, str):
+    token = token.strip()
+    if token:
+        print(token)
+PY
+    return 0
+  fi
+  if command -v node >/dev/null 2>&1; then
+    node - "$config_path" <<'NODE'
+const fs = require("node:fs");
+const configPath = process.argv[2];
+try {
+  const cfg = JSON.parse(fs.readFileSync(configPath, "utf8"));
+  const token = cfg?.gateway?.auth?.token;
+  if (typeof token === "string" && token.trim().length > 0) {
+    process.stdout.write(token.trim());
+  }
+} catch {
+  // Keep docker-setup resilient when config parsing fails.
+}
+NODE
+  fi
+}
+
+ensure_control_ui_allowed_origins() {
+  if [[ "${OPENCLAW_GATEWAY_BIND}" == "loopback" ]]; then
+    return 0
+  fi
+
+  local allowed_origin_json
+  local current_allowed_origins
+  allowed_origin_json="${OPENCLAW_CONTROL_UI_ALLOWED_ORIGINS:-}"
+  if [[ -z "$allowed_origin_json" ]]; then
+    allowed_origin_json="$(printf '["http://localhost:%s","http://127.0.0.1:%s","http://openclaw-gateway:%s"]' "$OPENCLAW_GATEWAY_PORT" "$OPENCLAW_GATEWAY_PORT" "$OPENCLAW_GATEWAY_PORT")"
+  fi
+  current_allowed_origins="$(
+    docker compose "${COMPOSE_ARGS[@]}" run --rm openclaw-cli \
+      config get gateway.controlUi.allowedOrigins 2>/dev/null || true
+  )"
+  current_allowed_origins="${current_allowed_origins//$'\r'/}"
+
+  if [[ -n "$current_allowed_origins" && "$current_allowed_origins" != "null" && "$current_allowed_origins" != "[]" ]]; then
+    echo "Control UI allowlist already configured; leaving gateway.controlUi.allowedOrigins unchanged."
+    return 0
+  fi
+
+  docker compose "${COMPOSE_ARGS[@]}" run --rm openclaw-cli \
+    config set gateway.controlUi.allowedOrigins "$allowed_origin_json" --strict-json >/dev/null
+  echo "Set gateway.controlUi.allowedOrigins to $allowed_origin_json for non-loopback bind."
+}
+
+sync_gateway_mode_and_bind() {
+  docker compose "${COMPOSE_ARGS[@]}" run --rm openclaw-cli \
+    config set gateway.mode local >/dev/null
+  docker compose "${COMPOSE_ARGS[@]}" run --rm openclaw-cli \
+    config set gateway.bind "$OPENCLAW_GATEWAY_BIND" >/dev/null
+  echo "Pinned gateway.mode=local and gateway.bind=$OPENCLAW_GATEWAY_BIND for Docker setup."
+}
+
+contains_disallowed_chars() {
+  local value="$1"
+  [[ "$value" == *$'\n'* || "$value" == *$'\r'* || "$value" == *$'\t'* ]]
+}
+
+validate_mount_path_value() {
+  local label="$1"
+  local value="$2"
+  if [[ -z "$value" ]]; then
+    fail "$label cannot be empty."
+  fi
+  if contains_disallowed_chars "$value"; then
+    fail "$label contains unsupported control characters."
+  fi
+  if [[ "$value" =~ [[:space:]] ]]; then
+    fail "$label cannot contain whitespace."
+  fi
+}
+
+validate_named_volume() {
+  local value="$1"
+  if [[ ! "$value" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+    fail "OPENCLAW_HOME_VOLUME must match [A-Za-z0-9][A-Za-z0-9_.-]* when using a named volume."
+  fi
+}
+
+validate_mount_spec() {
+  local mount="$1"
+  if contains_disallowed_chars "$mount"; then
+    fail "OPENCLAW_EXTRA_MOUNTS entries cannot contain control characters."
+  fi
+  if [[ ! "$mount" =~ ^[^[:space:],:]+:[^[:space:],:]+(:[^[:space:],:]+)?$ ]]; then
+    fail "Invalid mount format '$mount'. Expected source:target[:options] without spaces."
+  fi
+}
+
+# ── Prerequisites ─────────────────────────────────────────────────────────
+
+require_cmd docker
+if ! docker compose version >/dev/null 2>&1; then
+  echo "Docker Compose not available (try: docker compose version)" >&2
+  exit 1
+fi
+
+if [[ -z "$DOCKER_SOCKET_PATH" && "${DOCKER_HOST:-}" == unix://* ]]; then
+  DOCKER_SOCKET_PATH="${DOCKER_HOST#unix://}"
+fi
+if [[ -z "$DOCKER_SOCKET_PATH" ]]; then
+  DOCKER_SOCKET_PATH="/var/run/docker.sock"
+fi
+if is_truthy_value "$RAW_SANDBOX_SETTING"; then
+  SANDBOX_ENABLED="1"
+fi
+
+# ── Defaults (test harness paths) ────────────────────────────────────────
+
+OPENCLAW_CONFIG_DIR="${OPENCLAW_CONFIG_DIR:-$ROOT_DIR/openclaw-config}"
+OPENCLAW_WORKSPACE_DIR="${OPENCLAW_WORKSPACE_DIR:-$ROOT_DIR/openclaw-config/workspace}"
+
+validate_mount_path_value "OPENCLAW_CONFIG_DIR" "$OPENCLAW_CONFIG_DIR"
+validate_mount_path_value "OPENCLAW_WORKSPACE_DIR" "$OPENCLAW_WORKSPACE_DIR"
+if [[ -n "$HOME_VOLUME_NAME" ]]; then
+  if [[ "$HOME_VOLUME_NAME" == *"/"* ]]; then
+    validate_mount_path_value "OPENCLAW_HOME_VOLUME" "$HOME_VOLUME_NAME"
+  else
+    validate_named_volume "$HOME_VOLUME_NAME"
+  fi
+fi
+if contains_disallowed_chars "$EXTRA_MOUNTS"; then
+  fail "OPENCLAW_EXTRA_MOUNTS cannot contain control characters."
+fi
+if [[ -n "$SANDBOX_ENABLED" ]]; then
+  validate_mount_path_value "OPENCLAW_DOCKER_SOCKET" "$DOCKER_SOCKET_PATH"
+fi
+
+mkdir -p "$OPENCLAW_CONFIG_DIR"
+mkdir -p "$OPENCLAW_WORKSPACE_DIR"
+mkdir -p "$OPENCLAW_CONFIG_DIR/identity"
+mkdir -p "$OPENCLAW_CONFIG_DIR/agents/main/agent"
+mkdir -p "$OPENCLAW_CONFIG_DIR/agents/main/sessions"
+
+export OPENCLAW_CONFIG_DIR
+export OPENCLAW_WORKSPACE_DIR
+export OPENCLAW_GATEWAY_PORT="${OPENCLAW_GATEWAY_PORT:-18789}"
+export OPENCLAW_BRIDGE_PORT="${OPENCLAW_BRIDGE_PORT:-18790}"
+export OPENCLAW_GATEWAY_BIND="${OPENCLAW_GATEWAY_BIND:-lan}"
+export OPENCLAW_IMAGE="$IMAGE_NAME"
+export OPENCLAW_DOCKER_APT_PACKAGES="${OPENCLAW_DOCKER_APT_PACKAGES:-}"
+export OPENCLAW_EXTRA_MOUNTS="$EXTRA_MOUNTS"
+export OPENCLAW_HOME_VOLUME="$HOME_VOLUME_NAME"
+export OPENCLAW_ALLOW_INSECURE_PRIVATE_WS="${OPENCLAW_ALLOW_INSECURE_PRIVATE_WS:-}"
+export OPENCLAW_SANDBOX="$SANDBOX_ENABLED"
+export OPENCLAW_DOCKER_SOCKET="$DOCKER_SOCKET_PATH"
+
+# Detect Docker socket GID for sandbox group_add.
+DOCKER_GID=""
+if [[ -n "$SANDBOX_ENABLED" && -S "$DOCKER_SOCKET_PATH" ]]; then
+  DOCKER_GID="$(stat -c '%g' "$DOCKER_SOCKET_PATH" 2>/dev/null || stat -f '%g' "$DOCKER_SOCKET_PATH" 2>/dev/null || echo "")"
+fi
+export DOCKER_GID
+
+# ── Gateway token ─────────────────────────────────────────────────────────
+
+if [[ -z "${OPENCLAW_GATEWAY_TOKEN:-}" ]]; then
+  EXISTING_CONFIG_TOKEN="$(read_config_gateway_token || true)"
+  if [[ -n "$EXISTING_CONFIG_TOKEN" ]]; then
+    OPENCLAW_GATEWAY_TOKEN="$EXISTING_CONFIG_TOKEN"
+    echo "Reusing gateway token from $OPENCLAW_CONFIG_DIR/openclaw.json"
+  elif command -v openssl >/dev/null 2>&1; then
+    OPENCLAW_GATEWAY_TOKEN="$(openssl rand -hex 32)"
+  else
+    OPENCLAW_GATEWAY_TOKEN="$(python3 - <<'PY'
+import secrets
+print(secrets.token_hex(32))
+PY
+)"
+  fi
+fi
+export OPENCLAW_GATEWAY_TOKEN
+
+# ── Generate MosBot secrets if not set ────────────────────────────────────
+
+generate_secret() {
+  if command -v openssl >/dev/null 2>&1; then
+    openssl rand -hex 24
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -c "import secrets; print(secrets.token_hex(24))"
+  else
+    # Fallback using /dev/urandom
+    head -c 24 /dev/urandom | xxd -p
+  fi
+}
+
+if [[ -z "${JWT_SECRET:-}" ]]; then
+  JWT_SECRET="$(generate_secret)"
+fi
+export JWT_SECRET
+
+if [[ -z "${OPENCLAW_WORKSPACE_TOKEN:-}" ]]; then
+  OPENCLAW_WORKSPACE_TOKEN="$(generate_secret)"
+fi
+export OPENCLAW_WORKSPACE_TOKEN
+
+if [[ -z "${BOOTSTRAP_OWNER_PASSWORD:-}" ]]; then
+  BOOTSTRAP_OWNER_PASSWORD="$(generate_secret)"
+fi
+export BOOTSTRAP_OWNER_PASSWORD
+
+if [[ -z "${DB_PASSWORD:-}" ]]; then
+  DB_PASSWORD="mosbot"
+fi
+export DB_PASSWORD
+
+# ── Compose file handling ─────────────────────────────────────────────────
+
+COMPOSE_FILES=("$COMPOSE_FILE")
+COMPOSE_ARGS=()
+
+write_extra_compose() {
+  local home_volume="$1"
+  shift
+  local mount
+  local gateway_home_mount
+  local gateway_config_mount
+  local gateway_workspace_mount
+
+  cat >"$EXTRA_COMPOSE_FILE" <<'YAML'
+services:
+  openclaw-gateway:
+    volumes:
+YAML
+
+  if [[ -n "$home_volume" ]]; then
+    gateway_home_mount="${home_volume}:/home/node"
+    gateway_config_mount="${OPENCLAW_CONFIG_DIR}:/home/node/.openclaw"
+    gateway_workspace_mount="${OPENCLAW_WORKSPACE_DIR}:/home/node/.openclaw/workspace"
+    validate_mount_spec "$gateway_home_mount"
+    validate_mount_spec "$gateway_config_mount"
+    validate_mount_spec "$gateway_workspace_mount"
+    printf '      - %s\n' "$gateway_home_mount" >>"$EXTRA_COMPOSE_FILE"
+    printf '      - %s\n' "$gateway_config_mount" >>"$EXTRA_COMPOSE_FILE"
+    printf '      - %s\n' "$gateway_workspace_mount" >>"$EXTRA_COMPOSE_FILE"
+  fi
+
+  for mount in "$@"; do
+    validate_mount_spec "$mount"
+    printf '      - %s\n' "$mount" >>"$EXTRA_COMPOSE_FILE"
+  done
+
+  cat >>"$EXTRA_COMPOSE_FILE" <<'YAML'
+  openclaw-cli:
+    volumes:
+YAML
+
+  if [[ -n "$home_volume" ]]; then
+    printf '      - %s\n' "$gateway_home_mount" >>"$EXTRA_COMPOSE_FILE"
+    printf '      - %s\n' "$gateway_config_mount" >>"$EXTRA_COMPOSE_FILE"
+    printf '      - %s\n' "$gateway_workspace_mount" >>"$EXTRA_COMPOSE_FILE"
+  fi
+
+  for mount in "$@"; do
+    validate_mount_spec "$mount"
+    printf '      - %s\n' "$mount" >>"$EXTRA_COMPOSE_FILE"
+  done
+
+  if [[ -n "$home_volume" && "$home_volume" != *"/"* ]]; then
+    validate_named_volume "$home_volume"
+    cat >>"$EXTRA_COMPOSE_FILE" <<YAML
+volumes:
+  ${home_volume}:
+YAML
+  fi
+}
+
+if [[ -n "$SANDBOX_ENABLED" ]]; then
+  if [[ -z "${OPENCLAW_INSTALL_DOCKER_CLI:-}" ]]; then
+    export OPENCLAW_INSTALL_DOCKER_CLI=1
+  fi
+fi
+
+VALID_MOUNTS=()
+if [[ -n "$EXTRA_MOUNTS" ]]; then
+  IFS=',' read -r -a mounts <<<"$EXTRA_MOUNTS"
+  for mount in "${mounts[@]}"; do
+    mount="${mount#"${mount%%[![:space:]]*}"}"
+    mount="${mount%"${mount##*[![:space:]]}"}"
+    if [[ -n "$mount" ]]; then
+      VALID_MOUNTS+=("$mount")
+    fi
+  done
+fi
+
+if [[ -n "$HOME_VOLUME_NAME" || ${#VALID_MOUNTS[@]} -gt 0 ]]; then
+  if [[ ${#VALID_MOUNTS[@]} -gt 0 ]]; then
+    write_extra_compose "$HOME_VOLUME_NAME" "${VALID_MOUNTS[@]}"
+  else
+    write_extra_compose "$HOME_VOLUME_NAME"
+  fi
+  COMPOSE_FILES+=("$EXTRA_COMPOSE_FILE")
+fi
+for compose_file in "${COMPOSE_FILES[@]}"; do
+  COMPOSE_ARGS+=("-f" "$compose_file")
+done
+BASE_COMPOSE_ARGS=("${COMPOSE_ARGS[@]}")
+COMPOSE_HINT="docker compose"
+for compose_file in "${COMPOSE_FILES[@]}"; do
+  COMPOSE_HINT+=" -f ${compose_file}"
+done
+
+# ── Write .env ────────────────────────────────────────────────────────────
+
+ENV_FILE="$ROOT_DIR/.env"
+upsert_env() {
+  local file="$1"
+  shift
+  local -a keys=("$@")
+  local tmp
+  tmp="$(mktemp)"
+  local seen=" "
+
+  if [[ -f "$file" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      local key="${line%%=*}"
+      local replaced=false
+      for k in "${keys[@]}"; do
+        if [[ "$key" == "$k" ]]; then
+          printf '%s=%s\n' "$k" "${!k-}" >>"$tmp"
+          seen="$seen$k "
+          replaced=true
+          break
+        fi
+      done
+      if [[ "$replaced" == false ]]; then
+        printf '%s\n' "$line" >>"$tmp"
+      fi
+    done <"$file"
+  fi
+
+  for k in "${keys[@]}"; do
+    if [[ "$seen" != *" $k "* ]]; then
+      printf '%s=%s\n' "$k" "${!k-}" >>"$tmp"
+    fi
+  done
+
+  mv "$tmp" "$file"
+}
+
+upsert_env "$ENV_FILE" \
+  OPENCLAW_CONFIG_DIR \
+  OPENCLAW_WORKSPACE_DIR \
+  OPENCLAW_GATEWAY_PORT \
+  OPENCLAW_BRIDGE_PORT \
+  OPENCLAW_GATEWAY_BIND \
+  OPENCLAW_GATEWAY_TOKEN \
+  OPENCLAW_IMAGE \
+  OPENCLAW_EXTRA_MOUNTS \
+  OPENCLAW_HOME_VOLUME \
+  OPENCLAW_DOCKER_APT_PACKAGES \
+  OPENCLAW_SANDBOX \
+  OPENCLAW_DOCKER_SOCKET \
+  DOCKER_GID \
+  OPENCLAW_INSTALL_DOCKER_CLI \
+  OPENCLAW_ALLOW_INSECURE_PRIVATE_WS \
+  JWT_SECRET \
+  OPENCLAW_WORKSPACE_TOKEN \
+  BOOTSTRAP_OWNER_PASSWORD \
+  DB_PASSWORD \
+  TIMEZONE
+
+# ── Pull / build image ───────────────────────────────────────────────────
+
+if [[ "$IMAGE_NAME" == "openclaw:local" ]]; then
+  echo "==> Building Docker image: $IMAGE_NAME"
+  docker build \
+    --build-arg "OPENCLAW_DOCKER_APT_PACKAGES=${OPENCLAW_DOCKER_APT_PACKAGES}" \
+    --build-arg "OPENCLAW_INSTALL_DOCKER_CLI=${OPENCLAW_INSTALL_DOCKER_CLI:-}" \
+    -t "$IMAGE_NAME" \
+    -f "$ROOT_DIR/Dockerfile" \
+    "$ROOT_DIR"
+else
+  echo "==> Pulling Docker image: $IMAGE_NAME"
+  if ! docker pull "$IMAGE_NAME"; then
+    echo "ERROR: Failed to pull image $IMAGE_NAME. Please check the image name and your access permissions." >&2
+    exit 1
+  fi
+fi
+
+# ── Fix data-directory permissions ────────────────────────────────────────
+
+echo ""
+echo "==> Fixing data-directory permissions"
+docker compose "${COMPOSE_ARGS[@]}" run --rm --user root --entrypoint sh openclaw-cli -c \
+  'find /home/node/.openclaw -xdev -exec chown node:node {} +; \
+   [ -d /home/node/.openclaw/workspace/.openclaw ] && chown -R node:node /home/node/.openclaw/workspace/.openclaw || true'
+
+# ── OpenClaw onboarding ──────────────────────────────────────────────────
+
+echo ""
+echo "==> Onboarding (interactive)"
+echo "Docker setup pins Gateway mode to local."
+echo "Gateway runtime bind comes from OPENCLAW_GATEWAY_BIND (default: lan)."
+echo "Current runtime bind: $OPENCLAW_GATEWAY_BIND"
+echo "Gateway token: $OPENCLAW_GATEWAY_TOKEN"
+echo "Tailscale exposure: Off (use host-level tailnet/Tailscale setup separately)."
+echo "Install Gateway daemon: No (managed by Docker Compose)"
+echo ""
+docker compose "${COMPOSE_ARGS[@]}" run --rm openclaw-cli onboard --mode local --no-install-daemon
+
+echo ""
+echo "==> Docker gateway defaults"
+sync_gateway_mode_and_bind
+
+echo ""
+echo "==> Control UI origin allowlist"
+ensure_control_ui_allowed_origins
+
+echo ""
+echo "==> Provider setup (optional)"
+echo "WhatsApp (QR):"
+echo "  ${COMPOSE_HINT} run --rm openclaw-cli channels login"
+echo "Telegram (bot token):"
+echo "  ${COMPOSE_HINT} run --rm openclaw-cli channels add --channel telegram --token <token>"
+echo "Discord (bot token):"
+echo "  ${COMPOSE_HINT} run --rm openclaw-cli channels add --channel discord --token <token>"
+echo "Docs: https://docs.openclaw.ai/channels"
+
+echo ""
+echo "==> Starting gateway"
+docker compose "${COMPOSE_ARGS[@]}" up -d openclaw-gateway
+
+# ── Sandbox setup (opt-in via OPENCLAW_SANDBOX=1) ─────────────────────────
+
+if [[ -n "$SANDBOX_ENABLED" ]]; then
+  echo ""
+  echo "==> Sandbox setup"
+
+  if [[ -f "$ROOT_DIR/Dockerfile.sandbox" ]]; then
+    echo "Building sandbox image: openclaw-sandbox:bookworm-slim"
+    docker build \
+      -t "openclaw-sandbox:bookworm-slim" \
+      -f "$ROOT_DIR/Dockerfile.sandbox" \
+      "$ROOT_DIR"
+  else
+    echo "WARNING: Dockerfile.sandbox not found in $ROOT_DIR" >&2
+    echo "  Sandbox config will be applied but no sandbox image will be built." >&2
+    echo "  Agent exec may fail if the configured sandbox image does not exist." >&2
+  fi
+
+  if ! docker compose "${COMPOSE_ARGS[@]}" run --rm --entrypoint docker openclaw-gateway --version >/dev/null 2>&1; then
+    echo "WARNING: Docker CLI not found inside the container image." >&2
+    echo "  Sandbox requires Docker CLI. Rebuild with --build-arg OPENCLAW_INSTALL_DOCKER_CLI=1" >&2
+    echo "  or use a local build (OPENCLAW_IMAGE=openclaw:local). Skipping sandbox setup." >&2
+    SANDBOX_ENABLED=""
+  fi
+fi
+
+if [[ -n "$SANDBOX_ENABLED" ]]; then
+  if [[ -S "$DOCKER_SOCKET_PATH" ]]; then
+    SANDBOX_COMPOSE_FILE="$ROOT_DIR/docker-compose.sandbox.yml"
+    cat >"$SANDBOX_COMPOSE_FILE" <<YAML
+services:
+  openclaw-gateway:
+    volumes:
+      - ${DOCKER_SOCKET_PATH}:/var/run/docker.sock
+YAML
+    if [[ -n "${DOCKER_GID:-}" ]]; then
+      cat >>"$SANDBOX_COMPOSE_FILE" <<YAML
+    group_add:
+      - "${DOCKER_GID}"
+YAML
+    fi
+    COMPOSE_ARGS+=("-f" "$SANDBOX_COMPOSE_FILE")
+    echo "==> Sandbox: added Docker socket mount"
+  else
+    echo "WARNING: OPENCLAW_SANDBOX enabled but Docker socket not found at $DOCKER_SOCKET_PATH." >&2
+    echo "  Sandbox requires Docker socket access. Skipping sandbox setup." >&2
+    SANDBOX_ENABLED=""
+  fi
+fi
+
+if [[ -n "$SANDBOX_ENABLED" ]]; then
+  sandbox_config_ok=true
+  if ! docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps openclaw-cli \
+    config set agents.defaults.sandbox.mode "non-main" >/dev/null; then
+    echo "WARNING: Failed to set agents.defaults.sandbox.mode" >&2
+    sandbox_config_ok=false
+  fi
+  if ! docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps openclaw-cli \
+    config set agents.defaults.sandbox.scope "agent" >/dev/null; then
+    echo "WARNING: Failed to set agents.defaults.sandbox.scope" >&2
+    sandbox_config_ok=false
+  fi
+  if ! docker compose "${COMPOSE_ARGS[@]}" run --rm --no-deps openclaw-cli \
+    config set agents.defaults.sandbox.workspaceAccess "none" >/dev/null; then
+    echo "WARNING: Failed to set agents.defaults.sandbox.workspaceAccess" >&2
+    sandbox_config_ok=false
+  fi
+
+  if [[ "$sandbox_config_ok" == true ]]; then
+    echo "Sandbox enabled: mode=non-main, scope=agent, workspaceAccess=none"
+    echo "Docs: https://docs.openclaw.ai/gateway/sandboxing"
+    docker compose "${COMPOSE_ARGS[@]}" up -d openclaw-gateway
+  else
+    echo "WARNING: Sandbox config was partially applied. Check errors above." >&2
+    echo "  Skipping gateway restart to avoid exposing Docker socket without a full sandbox policy." >&2
+    if ! docker compose "${BASE_COMPOSE_ARGS[@]}" run --rm --no-deps openclaw-cli \
+      config set agents.defaults.sandbox.mode "off" >/dev/null; then
+      echo "WARNING: Failed to roll back agents.defaults.sandbox.mode to off" >&2
+    else
+      echo "Sandbox mode rolled back to off due to partial sandbox config failure."
+    fi
+    if [[ -n "${SANDBOX_COMPOSE_FILE:-}" ]]; then
+      rm -f "$SANDBOX_COMPOSE_FILE"
+    fi
+    docker compose "${BASE_COMPOSE_ARGS[@]}" up -d --force-recreate openclaw-gateway
+  fi
+else
+  if ! docker compose "${COMPOSE_ARGS[@]}" run --rm openclaw-cli \
+    config set agents.defaults.sandbox.mode "off" >/dev/null; then
+    echo "WARNING: Failed to reset agents.defaults.sandbox.mode to off" >&2
+  fi
+  if [[ -f "$ROOT_DIR/docker-compose.sandbox.yml" ]]; then
+    rm -f "$ROOT_DIR/docker-compose.sandbox.yml"
+  fi
+fi
+
+# ── Summary ───────────────────────────────────────────────────────────────
+
+echo ""
+echo "=========================================="
+echo "  MosBot Test Harness Setup Complete"
+echo "=========================================="
+echo ""
+echo "Config:    $OPENCLAW_CONFIG_DIR"
+echo "Workspace: $OPENCLAW_WORKSPACE_DIR"
+echo "Token:     $OPENCLAW_GATEWAY_TOKEN"
+echo ""
+echo "Generated secrets written to: $ENV_FILE"
+echo ""
+echo "Next steps:"
+echo "  make up              Start the full stack"
+echo "  make logs            Follow logs"
+echo "  make down            Stop all services"
+echo "  make reset           Nuke everything and start fresh"
+echo ""
+echo "Services:"
+echo "  Dashboard:           http://localhost:5173"
+echo "  API:                 http://localhost:3000"
+echo "  OpenClaw Gateway:    http://localhost:${OPENCLAW_GATEWAY_PORT}"
+echo "  Workspace Service:   http://localhost:18780"
+echo "  PostgreSQL:          localhost:5432"
+echo ""
+echo "Login:"
+echo "  Email:    mosbot@gmail.com"
+echo "  Password: $BOOTSTRAP_OWNER_PASSWORD"

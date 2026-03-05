@@ -58,3 +58,10 @@ build/
 # Local DB dumps
 *.sql.gz
 *.dump
+
+# Docker test harness runtime files
+docker/.env
+docker/docker-compose.extra.yml
+docker/docker-compose.sandbox.yml
+docker/openclaw-config/*
+!docker/openclaw-config/.gitkeep
