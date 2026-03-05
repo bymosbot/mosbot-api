@@ -24,7 +24,7 @@ help:
 	@echo "  See docs/guides/docker.md for details."
 
 up:
-	docker compose up -d
+	DOCKER_BUILDKIT=0 docker compose up -d
 
 down:
 	docker compose down

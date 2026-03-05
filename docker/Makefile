@@ -23,7 +23,7 @@ setup:
 	./docker-setup.sh
 
 up:
-	docker compose up -d
+	DOCKER_BUILDKIT=0 docker compose up -d
 
 down:
 	docker compose down
