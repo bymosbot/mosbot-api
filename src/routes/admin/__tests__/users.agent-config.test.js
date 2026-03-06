@@ -19,6 +19,10 @@ jest.mock('../../../services/openclawWorkspaceClient', () => ({
   makeOpenClawRequest: jest.fn(),
 }));
 
+jest.mock('../../../services/docsLinkReconciliationService', () => ({
+  ensureDocsLinkIfMissing: jest.fn().mockResolvedValue({ action: 'unchanged' }),
+}));
+
 jest.mock('../../auth', () => ({
   authenticateToken: (req, _res, next) => {
     req.user = {
@@ -40,6 +44,7 @@ jest.mock('../../auth', () => ({
 const pool = require('../../../db/pool');
 const logger = require('../../../utils/logger');
 const { makeOpenClawRequest } = require('../../../services/openclawWorkspaceClient');
+const { ensureDocsLinkIfMissing } = require('../../../services/docsLinkReconciliationService');
 const usersRouter = require('../users');
 
 function makeApp() {
@@ -61,6 +66,8 @@ describe('admin users agent config branches', () => {
     jest.clearAllMocks();
     pool.query.mockReset();
     makeOpenClawRequest.mockReset();
+    ensureDocsLinkIfMissing.mockReset();
+    ensureDocsLinkIfMissing.mockResolvedValue({ action: 'unchanged' });
     app = makeApp();
   });
 
@@ -245,5 +252,6 @@ describe('admin users agent config branches', () => {
       'coo',
       id,
     ]);
+    expect(ensureDocsLinkIfMissing).toHaveBeenCalledWith('coo');
   });
 });

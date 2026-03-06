@@ -18,6 +18,12 @@ jest.mock('../services/activityIngestionService', () => ({
 jest.mock('../services/openclawGatewayClient', () => ({
   warnIfDeviceAuthNotConfigured: jest.fn(),
 }));
+jest.mock('../services/docsLinkReconciliationService', () => ({
+  reconcileDocsLinksOnStartup: jest.fn().mockResolvedValue({
+    main: { action: 'unchanged' },
+    agents: [],
+  }),
+}));
 jest.mock('../utils/logger', () => ({
   info: jest.fn(),
   error: jest.fn(),

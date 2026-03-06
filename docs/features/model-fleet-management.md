@@ -331,7 +331,7 @@ The old `src/config/models.json` file is now **deprecated**. To migrate:
 
 **Solution:** Set environment variable:
 ```bash
-export OPENCLAW_WORKSPACE_URL=http://openclaw-workspace.agents.svc.cluster.local:8080
+export OPENCLAW_WORKSPACE_URL=http://openclaw-workspace.agents.svc.cluster.local:18780
 ```
 
 ### "Cannot delete the default model"

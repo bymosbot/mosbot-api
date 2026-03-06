@@ -3,7 +3,7 @@ global.fetch = jest.fn();
 const mockConfig = {
   nodeEnv: 'test',
   openclaw: {
-    workspaceUrl: 'http://workspace-service:8080',
+    workspaceUrl: 'http://workspace-service:18780',
     workspaceToken: null,
   },
 };
@@ -20,6 +20,9 @@ const {
   makeOpenClawRequest,
   getFileContent,
   putFileContent,
+  getWorkspaceLink,
+  ensureWorkspaceLink,
+  deleteWorkspaceLink,
   isRetryableError,
   sleep,
 } = require('../openclawWorkspaceClient');
@@ -29,7 +32,7 @@ describe('openclawWorkspaceClient', () => {
     jest.clearAllMocks();
     jest.useRealTimers();
     mockConfig.nodeEnv = 'test';
-    mockConfig.openclaw.workspaceUrl = 'http://workspace-service:8080';
+    mockConfig.openclaw.workspaceUrl = 'http://workspace-service:18780';
     mockConfig.openclaw.workspaceToken = null;
     global.fetch.mockReset();
   });
@@ -72,24 +75,6 @@ describe('openclawWorkspaceClient', () => {
       });
     });
 
-    it('uses default in-cluster URL in production when workspaceUrl is missing', async () => {
-      mockConfig.nodeEnv = 'production';
-      mockConfig.openclaw.workspaceUrl = null;
-      global.fetch.mockResolvedValueOnce({
-        ok: true,
-        status: 200,
-        json: async () => ({ ok: true }),
-      });
-
-      const result = await makeOpenClawRequest('GET', '/health');
-
-      expect(result).toEqual({ ok: true });
-      expect(global.fetch).toHaveBeenCalledWith(
-        'http://openclaw-workspace.agents.svc.cluster.local:8080/health',
-        expect.objectContaining({ method: 'GET' }),
-      );
-    });
-
     it('includes auth header and body when provided', async () => {
       mockConfig.openclaw.workspaceToken = 'token-123';
       global.fetch.mockResolvedValueOnce({
@@ -101,7 +86,7 @@ describe('openclawWorkspaceClient', () => {
       await makeOpenClawRequest('PUT', '/files', { path: '/a.txt', content: 'x' });
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'http://workspace-service:8080/files',
+        'http://workspace-service:18780/files',
         expect.objectContaining({
           method: 'PUT',
           body: JSON.stringify({ path: '/a.txt', content: 'x' }),
@@ -211,7 +196,7 @@ describe('openclawWorkspaceClient', () => {
 
       await expect(getFileContent('/runtime/file.txt')).resolves.toBe('abc');
       expect(global.fetch).toHaveBeenCalledWith(
-        'http://workspace-service:8080/files/content?path=%2Fruntime%2Ffile.txt',
+        'http://workspace-service:18780/files/content?path=%2Fruntime%2Ffile.txt',
         expect.objectContaining({ method: 'GET' }),
       );
     });
@@ -258,7 +243,7 @@ describe('openclawWorkspaceClient', () => {
       await putFileContent('/a.txt', 'hello');
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'http://workspace-service:8080/files',
+        'http://workspace-service:18780/files',
         expect.objectContaining({
           method: 'PUT',
           body: JSON.stringify({
@@ -280,7 +265,7 @@ describe('openclawWorkspaceClient', () => {
       await putFileContent('/a.bin', 'AA==', 'base64');
 
       expect(global.fetch).toHaveBeenCalledWith(
-        'http://workspace-service:8080/files',
+        'http://workspace-service:18780/files',
         expect.objectContaining({
           body: JSON.stringify({
             path: '/a.bin',
@@ -288,6 +273,50 @@ describe('openclawWorkspaceClient', () => {
             encoding: 'base64',
           }),
         }),
+      );
+    });
+  });
+
+  describe('workspace link helpers', () => {
+    it('getWorkspaceLink calls the links endpoint', async () => {
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ state: 'missing' }),
+      });
+
+      await expect(getWorkspaceLink('docs', 'main')).resolves.toEqual({ state: 'missing' });
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://workspace-service:18780/links/docs/main',
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    it('ensureWorkspaceLink calls PUT on the links endpoint', async () => {
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ action: 'created' }),
+      });
+
+      await ensureWorkspaceLink('docs', 'cto');
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://workspace-service:18780/links/docs/cto',
+        expect.objectContaining({ method: 'PUT' }),
+      );
+    });
+
+    it('deleteWorkspaceLink calls DELETE on the links endpoint', async () => {
+      global.fetch.mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        json: async () => ({ action: 'deleted' }),
+      });
+
+      await deleteWorkspaceLink('docs', 'cto');
+      expect(global.fetch).toHaveBeenCalledWith(
+        'http://workspace-service:18780/links/docs/cto',
+        expect.objectContaining({ method: 'DELETE' }),
       );
     });
   });

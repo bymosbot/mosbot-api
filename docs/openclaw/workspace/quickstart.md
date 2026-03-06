@@ -36,8 +36,13 @@ curl -H "Authorization: Bearer <MOSBOT_JWT>" \
 
 ```bash
 curl -H "Authorization: Bearer <MOSBOT_JWT>" \
-  "http://localhost:3000/api/v1/openclaw/workspace/files?path=/&recursive=true"
+  "http://localhost:3000/api/v1/openclaw/workspace/files?path=/workspace&recursive=true"
 ```
+
+Notes:
+
+- `path=/` is denied by workspace-service policy; always use an explicit allowlisted path
+- Docs links are reconciled by Mosbot API lifecycle hooks (startup + agent create/update), not by dashboard page loads
 
 ## Full docs
 

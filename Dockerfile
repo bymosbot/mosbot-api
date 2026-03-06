@@ -1,12 +1,12 @@
 # MosBot API - Multi-stage Docker build
 # Use Debian slim for better multi-platform (arm64) build compatibility under QEMU
-FROM node:18-bookworm-slim AS base
+FROM node:25-alpine3.22 AS base
 
 # Install security updates and dumb-init for proper signal handling
-RUN apt-get update && \
-    apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends dumb-init && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+RUN apk update && \
+    apk upgrade && \
+    apk add --no-cache dumb-init && \
+    rm -rf /var/cache/apk/*
 
 # App directory (node user already exists in official image)
 WORKDIR /app
@@ -73,7 +73,7 @@ EXPOSE 3000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
+    CMD node -e "require('http').get('http://localhost:3000/health', (r) => {process.exit(r.statusCode === 200 ? 0 : 1)})"
 
 # Use dumb-init to handle signals properly
 ENTRYPOINT ["dumb-init", "--"]

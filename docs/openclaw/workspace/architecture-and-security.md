@@ -28,6 +28,21 @@ To avoid accidental overwrites:
 
 If the workspace service supports atomic create (e.g. Node `fs.open(path, 'wx')`), it should be used to avoid race-condition overwrites.
 
+## System-managed docs link reconciliation
+
+Mosbot API manages shared docs-link bootstrap internally; the dashboard does not perform link writes.
+
+- On API startup, Mosbot attempts non-fatal reconcile for `main` plus all agent IDs in `openclaw.json` (`agents.list`)
+- On agent config create/update flows, Mosbot attempts a non-fatal reconcile for that agent
+- Reconcile behavior:
+  - `GET /links/docs/:agentId`
+  - `PUT /links/docs/:agentId` only when state is `missing`
+  - `linked` is a no-op
+  - `conflict` is logged as warning; request continues
+- There is no public Mosbot API endpoint for link management in this phase
+
+This keeps lifecycle ownership server-side and avoids dashboard-triggered writes on page loads.
+
 ## Related
 
 - Public API contract: `docs/api/openclaw-public-api.md`

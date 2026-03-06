@@ -180,8 +180,8 @@ Check OpenClaw Gateway documentation for advanced access control options.
 
 ## Related Documentation
 
-- [OpenClaw Gateway Configuration](https://github.com/openclaw/openclaw/docs/gateway-config.md)
-- [MosBot API OpenClaw Integration](../integrations/openclaw.md)
+- [OpenClaw Gateway Configuration](https://github.com/openclaw/openclaw/blob/main/docs/gateway/configuration-reference.md)
+- [MosBot API OpenClaw Integration](./README.md)
 - [Troubleshooting Empty Sessions](../troubleshooting/empty-sessions-with-usage.md)
 
 ## Support

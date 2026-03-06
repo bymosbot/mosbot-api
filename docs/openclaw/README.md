@@ -10,8 +10,5 @@ This folder contains canonical documentation for Mosbot’s OpenClaw integration
 
 ## Legacy implementation notes
 
-Older, long-form implementation docs live under:
-
-- `docs/openclaw/workspace/legacy/`
-
-Prefer the canonical docs in `docs/openclaw/` unless you specifically need historical context.
+Older implementation notes may still appear in historical commits and archived PR discussions.
+Prefer the canonical docs in `docs/openclaw/` for current behavior.

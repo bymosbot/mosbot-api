@@ -112,7 +112,7 @@ describe('GET /api/v1/tasks/:id/subagents', () => {
 
     // Mock fetch for workspace service (runtime files)
     originalFetch = global.fetch;
-    mockWorkspaceUrl = 'http://mock-workspace:8080';
+    mockWorkspaceUrl = 'http://mock-workspace:18780';
     process.env.OPENCLAW_WORKSPACE_URL = mockWorkspaceUrl;
     // OPENCLAW_GATEWAY_URL not needed — openclawGatewayClient is mocked
   });

@@ -39,13 +39,9 @@ async function makeOpenClawRequest(method, path, body = null, retryCount = 0) {
   const baseDelayMs = isTestEnvironment ? 10 : 500; // Reduce delay in test environment
   const timeoutMs = isTestEnvironment ? 8000 : 10000; // 8 seconds in test mode (was 5s), 10 seconds in production
 
-  // Only use Kubernetes default if explicitly in production environment
-  // In development, require explicit configuration to avoid connection errors
-  const openclawUrl =
-    config.openclaw.workspaceUrl ||
-    (config.nodeEnv === 'production'
-      ? 'http://openclaw-workspace.agents.svc.cluster.local:8080'
-      : null);
+  // Require explicit workspace URL in all environments.
+  // If OPENCLAW_WORKSPACE_URL is missing, workspace-backed features are disabled.
+  const openclawUrl = config.openclaw.workspaceUrl;
   const openclawToken = config.openclaw.workspaceToken;
 
   // Check if OpenClaw is configured (in local dev, URL should be explicitly set)
@@ -237,10 +233,52 @@ async function putFileContent(path, content, encoding = 'utf8') {
   });
 }
 
+/**
+ * Get workspace link state for a type/agent target
+ * @param {string} type - Link type (currently "docs")
+ * @param {string} agentId - Agent ID or "main"
+ * @returns {Promise<Object>} Link state payload
+ */
+async function getWorkspaceLink(type, agentId) {
+  return makeOpenClawRequest(
+    'GET',
+    `/links/${encodeURIComponent(type)}/${encodeURIComponent(agentId)}`,
+  );
+}
+
+/**
+ * Ensure workspace link exists for a type/agent target
+ * @param {string} type - Link type (currently "docs")
+ * @param {string} agentId - Agent ID or "main"
+ * @returns {Promise<Object>} Link ensure payload
+ */
+async function ensureWorkspaceLink(type, agentId) {
+  return makeOpenClawRequest(
+    'PUT',
+    `/links/${encodeURIComponent(type)}/${encodeURIComponent(agentId)}`,
+  );
+}
+
+/**
+ * Delete managed workspace link for a type/agent target
+ * @param {string} type - Link type (currently "docs")
+ * @param {string} agentId - Agent ID or "main"
+ * @returns {Promise<Object>} Link delete payload
+ */
+async function deleteWorkspaceLink(type, agentId) {
+  return makeOpenClawRequest(
+    'DELETE',
+    `/links/${encodeURIComponent(type)}/${encodeURIComponent(agentId)}`,
+  );
+}
+
 module.exports = {
   makeOpenClawRequest,
   getFileContent,
   putFileContent,
+  getWorkspaceLink,
+  ensureWorkspaceLink,
+  deleteWorkspaceLink,
   sleep,
   isRetryableError,
 };

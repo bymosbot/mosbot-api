@@ -353,8 +353,8 @@ try {
 ## Related Documentation
 
 - [Migration Guide](./migration-guide.md)
-- [Database Schema](../src/db/schema.sql)
-- [Tags Utility](../src/utils/tags.js)
+- [Database Schema](../../src/db/schema.sql)
+- [Tags Utility](../../src/utils/tags.js)
 
 ## Support
 

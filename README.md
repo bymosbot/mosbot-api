@@ -7,7 +7,7 @@
 
 The **API and backend layer** of [MosBot OS](https://github.com/bymosbot/mosbot-dashboard) — a self-hosted operating system for AI agent work.
 
-MosBot API is a Node.js/Express service backed by PostgreSQL. It transforms and serves data from [OpenClaw](docs/integrations/openclaw.md) (the AI agent runtime) and provides REST endpoints consumed by the MosBot Dashboard.
+MosBot API is a Node.js/Express service backed by PostgreSQL. It transforms and serves data from [OpenClaw](docs/openclaw/README.md) (the AI agent runtime) and provides REST endpoints consumed by the MosBot Dashboard.
 
 > **Disclaimer:** MosBot OS is vibe-coded with minimal actual code reviews. It is currently used for personal usage only.
 
@@ -113,25 +113,31 @@ To use agent management, workspace browsing, and org chart features, MosBot API 
 
 | Service | Default port | Purpose |
 | ------- | ------------ | ------- |
-| **Workspace** | `8080` | File access, config, org chart |
+| **Workspace** | `18780` | File access, config, org chart |
 | **Gateway** | `18789` | Runtime control, tool invocation |
 
 **Ensure endpoints are accessible** from wherever the API runs:
 
-- **OpenClaw runs locally** — Use `http://localhost:8080` and `http://localhost:18789` in `.env`.
+- **OpenClaw runs locally** — Use `http://localhost:18780` and `http://localhost:18789` in `.env`.
 - **OpenClaw runs in Kubernetes** — Port-forward both services, then point the API at localhost (or `host.docker.internal` if the API runs in Docker):
 
   ```bash
   # Terminal 1: Workspace
-  kubectl port-forward -n <namespace> svc/openclaw-workspace 8080:8080
+  kubectl port-forward -n <namespace> svc/openclaw-workspace 18780:18780
 
   # Terminal 2: Gateway
   kubectl port-forward -n <namespace> svc/openclaw 18789:18789
   ```
 
-- **OpenClaw runs on a VPS or remote host** — Expose ports 8080 and 18789 on the VPS (firewall/security group). If MosBot API runs on the **same** VPS, use `http://localhost:8080` and `http://localhost:18789`. If the API runs elsewhere, use the VPS hostname or IP (e.g. `http://openclaw.example.com:8080`). Prefer a VPN or private network when exposing these services across the internet.
+- **OpenClaw runs on a VPS or remote host** — Expose ports 18780 and 18789 on the VPS (firewall/security group). If MosBot API runs on the **same** VPS, use `http://localhost:18780` and `http://localhost:18789`. If the API runs elsewhere, use the VPS hostname or IP (e.g. `http://openclaw.example.com:18780`). Prefer a VPN or private network when exposing these services across the internet.
 
-Add to `.env`: `OPENCLAW_WORKSPACE_URL`, `OPENCLAW_WORKSPACE_TOKEN`, `OPENCLAW_GATEWAY_URL`, `OPENCLAW_GATEWAY_TOKEN`. See [docs/openclaw/README.md](docs/openclaw/README.md) and [docs/guides/openclaw-local-development.md](docs/guides/openclaw-local-development.md) for details.
+Add to `.env`: `OPENCLAW_WORKSPACE_URL`, `OPENCLAW_WORKSPACE_TOKEN`, `OPENCLAW_GATEWAY_URL`,
+`OPENCLAW_GATEWAY_TOKEN`, and optionally `OPENCLAW_PATH_REMAP_PREFIXES` for extra host-path
+remaps. Built-in prefixes are always active:
+`/home/node/.openclaw/workspace`, `~/.openclaw/workspace`, `/home/node/.openclaw`,
+`~/.openclaw` (most specific prefix wins). See
+[docs/openclaw/README.md](docs/openclaw/README.md) and
+[docs/guides/openclaw-local-development.md](docs/guides/openclaw-local-development.md) for details.
 
 > **Production build:** to run the dashboard as an optimised nginx bundle instead, use `make up-prod` (or `docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build`). This is only needed for production deployments — day-to-day development uses `make up`.
 

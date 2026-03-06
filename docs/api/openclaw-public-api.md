@@ -2005,8 +2005,18 @@ List workspace files (all authenticated users can view metadata).
 
 Query parameters:
 
-- `path` (optional, default `/`): workspace path to list
+- `path` (optional, default `/workspace`): workspace path to list
 - `recursive` (optional, default `false`): whether to list recursively
+
+Allowed path families:
+
+- `/workspace` and `/workspace/**`
+- `/workspace-<agent>` and `/workspace-<agent>/**`
+- `/docs/**`, `/projects/**`, `/skills/**`, `/shared/scripts/**`
+- `/openclaw.json`, `/agents.json`
+- `/_archived_workspace_main/**` (legacy)
+
+`/` is not allowed and returns `403` with code `PATH_NOT_ALLOWED`.
 
 Response `200`:
 
@@ -2046,7 +2056,13 @@ Errors:
 
 - `400` invalid path (e.g., path traversal attempts)
 - `401` authentication required
+- `403` path is outside allowed workspace virtual roots (`PATH_NOT_ALLOWED`)
 - `503` OpenClaw service not configured or unavailable
+
+Internal lifecycle note:
+
+- Mosbot API manages docs-link reconciliation server-side via the workspace-service link resource (`/links/docs/:agentId`) during startup and agent config create/update flows.
+- No dashboard-triggered or public link-management endpoint is exposed in Mosbot API in this phase.
 
 ### GET `/openclaw/workspace/files/content`
 

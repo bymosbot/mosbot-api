@@ -7,7 +7,7 @@
 If running locally with port-forward, start with:
 
 ```bash
-curl -v http://localhost:8080/health
+curl -v http://localhost:18780/health
 ```
 
 ### Mosbot workspace status
@@ -25,6 +25,12 @@ curl -H "Authorization: Bearer <MOSBOT_JWT>" \
   - Missing/invalid Mosbot JWT or insufficient role for content/mutation routes
 - **404 file not found**
   - Wrong path (remember workspace paths are rooted at `/`)
+- **403 `PATH_NOT_ALLOWED` from workspace service**
+  - Path is outside the workspace-service allowlist
+  - `path=/` is intentionally denied; use an explicit root such as `/workspace`, `/docs`, `/projects`, `/skills`, or `/workspace-<agent>`
+- **`docs` link not present under a workspace**
+  - Reconciliation is system-triggered (startup + agent create/update)
+  - Mosbot API logs warnings for link conflicts but does not fail user requests
 
 ## Kubernetes debugging snippets
 

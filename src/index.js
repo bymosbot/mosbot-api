@@ -9,6 +9,7 @@ const { startSessionUsagePoller } = require('./services/sessionUsageService');
 const { startPricingRefreshJob } = require('./services/modelPricingService');
 const { startActivityIngestionPollers } = require('./services/activityIngestionService');
 const { warnIfDeviceAuthNotConfigured } = require('./services/openclawGatewayClient');
+const { reconcileDocsLinksOnStartup } = require('./services/docsLinkReconciliationService');
 
 config.validate();
 
@@ -105,6 +106,10 @@ async function start() {
     });
     warnIfDeviceAuthNotConfigured();
   });
+
+  // System-triggered docs link reconciliation (non-fatal):
+  // ensures main + configured agents have docs links.
+  reconcileDocsLinksOnStartup();
 
   startSessionUsagePoller(config.polling.sessionUsageIntervalMs);
   startPricingRefreshJob(config.polling.modelPricingRefreshIntervalMs);

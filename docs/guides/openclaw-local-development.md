@@ -32,7 +32,7 @@ kubectl get secret -n openclaw-personal openclaw-secrets \
 
 ```bash
 # Terminal 1: Workspace service
-kubectl port-forward -n openclaw-personal svc/openclaw-workspace 8080:8080
+kubectl port-forward -n openclaw-personal svc/openclaw-workspace 18780:18780
 
 # Terminal 2: Gateway service (if used)
 kubectl port-forward -n openclaw-personal svc/openclaw 18789:18789
@@ -43,7 +43,7 @@ kubectl port-forward -n openclaw-personal svc/openclaw 18789:18789
 If running the API natively on your host:
 
 ```bash
-OPENCLAW_WORKSPACE_URL=http://localhost:8080
+OPENCLAW_WORKSPACE_URL=http://localhost:18780
 OPENCLAW_GATEWAY_URL=http://localhost:18789
 OPENCLAW_WORKSPACE_TOKEN=<workspace-token>
 OPENCLAW_GATEWAY_TOKEN=<gateway-token>
@@ -52,7 +52,7 @@ OPENCLAW_GATEWAY_TOKEN=<gateway-token>
 If running the API in Docker, prefer `host.docker.internal` for the forwarded ports:
 
 ```bash
-OPENCLAW_WORKSPACE_URL=http://host.docker.internal:8080
+OPENCLAW_WORKSPACE_URL=http://host.docker.internal:18780
 OPENCLAW_GATEWAY_URL=http://host.docker.internal:18789
 ```
 
@@ -73,7 +73,7 @@ curl http://localhost:3000/api/v1/openclaw/agents
 ### Workspace service connectivity (direct)
 
 ```bash
-curl -H "Authorization: Bearer <workspace-token>" http://localhost:8080/status
+curl -H "Authorization: Bearer <workspace-token>" http://localhost:18780/status
 ```
 
 ## Troubleshooting

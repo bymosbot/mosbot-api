@@ -76,6 +76,9 @@ const config = {
     get workspaceToken() {
       return process.env.OPENCLAW_WORKSPACE_TOKEN || null;
     },
+    get pathRemapPrefixes() {
+      return process.env.OPENCLAW_PATH_REMAP_PREFIXES || '';
+    },
     subagentRetentionDays: parseInt(process.env.SUBAGENT_RETENTION_DAYS || '30', 10),
     activityLogRetentionDays: parseInt(process.env.ACTIVITY_LOG_RETENTION_DAYS || '7', 10),
   },

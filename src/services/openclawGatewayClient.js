@@ -29,6 +29,10 @@ function getDeviceAuthConfig() {
 
 const DEVICE_CLIENT_ID = 'openclaw-control-ui';
 const DEVICE_CLIENT_MODE = 'webchat';
+// Non-device fallback should identify as a backend gateway client, not Control UI.
+// Control UI clients are intentionally gated to local/pairing-safe contexts.
+const INSECURE_FALLBACK_CLIENT_ID = 'gateway-client';
+const INSECURE_FALLBACK_CLIENT_MODE = 'backend';
 const DEVICE_ROLE = 'operator';
 const DEVICE_SCOPES = [
   'operator.admin',
@@ -609,15 +613,12 @@ async function gatewayWsRpcWithDeviceAuth(method, params = {}) {
     throw err;
   }
 
-  // When device auth is not configured, fall back to allowInsecureAuth path.
-  // This requires gateway.controlUi.allowInsecureAuth: true in openclaw.json,
-  // which grants operator.admin scope to the openclaw-control-ui client without
-  // requiring a paired device or Ed25519 key pair.
+  // When device auth is not configured, fall back to shared gateway auth using
+  // a backend client identity (not Control UI). Control UI identities are
+  // intentionally restricted to local/pairing-safe contexts.
   const useInsecureAuth = !deviceAuth;
   if (useInsecureAuth) {
-    logger.debug(
-      'Device auth not configured — using allowInsecureAuth fallback (requires gateway.controlUi.allowInsecureAuth: true)',
-    );
+    logger.debug('Device auth not configured — using shared gateway auth fallback');
   }
 
   const wsUrl = gatewayUrl.replace(/^http:\/\//, 'ws://').replace(/^https:\/\//, 'wss://');
@@ -669,22 +670,22 @@ async function gatewayWsRpcWithDeviceAuth(method, params = {}) {
       try {
         let connectPayload;
         if (useInsecureAuth) {
-          // allowInsecureAuth path: no device field, gateway token in auth.
-          // gateway.controlUi.allowInsecureAuth: true must be set in openclaw.json.
+          // Shared-auth fallback: identify as a backend gateway client to avoid
+          // Control UI device-identity restrictions for remote HTTPS/WSS setups.
           connectPayload = {
             minProtocol: 3,
             maxProtocol: 3,
             client: {
-              id: DEVICE_CLIENT_ID,
+              id: INSECURE_FALLBACK_CLIENT_ID,
               version: 'server',
               platform: 'node',
-              mode: DEVICE_CLIENT_MODE,
+              mode: INSECURE_FALLBACK_CLIENT_MODE,
             },
             role: DEVICE_ROLE,
             scopes: DEVICE_SCOPES,
             auth: gatewayToken ? { token: gatewayToken } : undefined,
           };
-          logger.debug('Sending allowInsecureAuth connect handshake');
+          logger.debug('Sending shared-auth backend connect handshake');
         } else {
           connectPayload = buildDeviceConnectPayload(deviceAuth, nonce);
           logger.debug('Sending device-auth connect handshake', {
@@ -727,8 +728,9 @@ async function gatewayWsRpcWithDeviceAuth(method, params = {}) {
         return;
       }
 
-      // Device-auth: gateway sends connect.challenge before we send connect
-      if (msg.type === 'event' && msg.event === 'connect.challenge') {
+      // Device-auth: gateway sends connect.challenge before we send connect.
+      // Skip this for insecure-auth path — connect was already sent from the open handler.
+      if (msg.type === 'event' && msg.event === 'connect.challenge' && !useInsecureAuth) {
         const nonce = msg.payload?.nonce || '';
         doConnectAndRpc(nonce);
         return;
@@ -751,7 +753,7 @@ async function gatewayWsRpcWithDeviceAuth(method, params = {}) {
 
     ws.on('open', () => {
       if (useInsecureAuth) {
-        // allowInsecureAuth path: no challenge/response — send connect immediately on open
+        // Shared-auth fallback: no challenge/response — send connect immediately on open
         doConnectAndRpc('');
       } else {
         // Device-auth path: wait for connect.challenge event from gateway
@@ -833,7 +835,7 @@ function warnIfDeviceAuthNotConfigured() {
 
   if (missing.length > 0) {
     logger.info(
-      'OpenClaw device auth not configured — falling back to allowInsecureAuth path (requires gateway.controlUi.allowInsecureAuth: true in openclaw.json)',
+      'OpenClaw device auth not configured — falling back to shared gateway auth with backend client identity',
       {
         missingVars: missing,
       },

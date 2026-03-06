@@ -4,6 +4,7 @@ const pool = require('../../db/pool');
 const bcrypt = require('bcrypt');
 const { authenticateToken, requireManageUsers } = require('../auth');
 const logger = require('../../utils/logger');
+const { ensureDocsLinkIfMissing } = require('../../services/docsLinkReconciliationService');
 
 // Apply auth middleware to all routes
 router.use(authenticateToken);
@@ -700,6 +701,8 @@ router.put('/:id/agent', requireManageUsers, validateUUID('id'), async (req, res
         });
       }
     }
+
+    await ensureDocsLinkIfMissing(agentIdSlug);
 
     res.json({
       data: {

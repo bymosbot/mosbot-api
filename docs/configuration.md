@@ -68,6 +68,7 @@ Test database (optional — used for integration tests when set):
 | -------- | ------- | ----------- |
 | `OPENCLAW_WORKSPACE_URL` | — | URL of the OpenClaw workspace service |
 | `OPENCLAW_WORKSPACE_TOKEN` | — | Bearer token for workspace service auth |
+| `OPENCLAW_PATH_REMAP_PREFIXES` | `''` | Comma-separated additional host path prefixes remapped to virtual workspace paths before allowlist checks. Built-ins are always active: `/home/node/.openclaw/workspace`, `~/.openclaw/workspace`, `/home/node/.openclaw`, `~/.openclaw` (most specific prefix wins). |
 
 ## OpenClaw Gateway (optional)
 
